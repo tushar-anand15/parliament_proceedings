@@ -1,0 +1,60 @@
+ # Python bytecode and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+env/
+venv/
+ENV/
+.venv/
+env.bak/
+
+# Editor settings and IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+parliament_api/logs/
+
+# Local databases
+*.sqlite3
+db.sqlite3
+parliament_api/db.sqlite3
+
+# Environment variables
+.env
+.env.*
+
+# Test / coverage outputs
+htmlcov/
+.tox/
+.nox/
+.coverage
+.cache/
+coverage.xml
+*.cover
+*.py,cover
+.pytest_cache/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Static and media files generated at runtime (Django collectstatic etc.)
+static/
+staticfiles/
+media/
+
+# Scraper raw data dumps
+scraper/*.json
