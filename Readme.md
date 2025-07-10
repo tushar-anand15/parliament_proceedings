@@ -1,6 +1,6 @@
 ## Parliamentary proceedings data
 
-The data published at https://sansad.in/ls/questions/questions-and-answers?1 covers every question asked in the Indian Parliament, along with debates and allied proceedings. It's a national treasure—funded by taxpayers—and it **should be freely and easily accessible to everyone.**
+The data published at https://sansad.in/ls/questions/questions-and-answers?1 covers every question asked in the Indian Parliament, along with debates and allied proceedings. It's a national treasure—funded by taxpayers—and it **should be freely and easily accessible for everyone.**
 
 I've already scraped the full archive and turned it into a continuously updated database. A self-hosted API is live so anyone can download the raw records without jumping through hoops.
 
