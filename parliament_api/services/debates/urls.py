@@ -15,6 +15,7 @@ urlpatterns = [
     # Debate scraping control
     path('start-scraping/', views.StartDebateScrapingView.as_view(), name='start-debate-scraping'),
     path('scraping-status/', views.DebateScrapingStatusView.as_view(), name='debate-scraping-status'),
+    path('task-status/<str:task_id>/', views.CeleryTaskStatusView.as_view(), name='celery-task-status'),
     
     # Statistics and search
     path('statistics/', views.DebateStatisticsView.as_view(), name='debate-statistics'),

@@ -48,6 +48,9 @@ class ScrapingJob(models.Model):
     max_retries = models.IntegerField(default=3)
     delay_between_requests = models.FloatField(default=0.5)  # seconds
     
+    # Celery Task Tracking
+    task_id = models.CharField(max_length=255, blank=True, null=True, help_text='Celery task ID for tracking')
+    
     # Execution Details
     started_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
     worker_id = models.CharField(max_length=50, blank=True)

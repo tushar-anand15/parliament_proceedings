@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 import logging
 from datetime import datetime
@@ -76,9 +77,28 @@ class QuestionDownloadService:
             doc_file.last_download_attempt = timezone.now()
             doc_file.save()
             
-            # Download PDF
-            response = self.session.get(pdf_url, timeout=30, stream=True)
-            response.raise_for_status()
+            # Download PDF with retry logic for SSL issues
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    response = self.session.get(pdf_url, timeout=30, stream=True, verify=True)
+                    response.raise_for_status()
+                    break
+                except requests.exceptions.SSLError as ssl_error:
+                    if attempt < max_retries - 1:
+                        logger.warning(f"SSL error on attempt {attempt + 1}, retrying: {ssl_error}")
+                        time.sleep(1)  # Brief delay before retry
+                        continue
+                    else:
+                        logger.error(f"SSL error after {max_retries} attempts: {ssl_error}")
+                        raise
+                except Exception as e:
+                    logger.error(f"Download error on attempt {attempt + 1}: {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(1)
+                        continue
+                    else:
+                        raise
             
             # Save to file
             file_name = doc_file.file_name
@@ -125,90 +145,122 @@ class QuestionDownloadService:
             
             return False
     
-    def bulk_download_questions(self, questions: List[Question]) -> Dict:
-        """Download PDFs for multiple questions"""
+    def bulk_download_questions(self, questions: List[Question], use_celery: bool = True) -> Dict:
+        """Download PDFs for multiple questions using Celery tasks"""
         
-        results = {
-            'total': len(questions),
-            'queued': 0,
-            'already_downloaded': 0,
-            'no_pdf': 0,
-            'errors': []
-        }
-        
-        for question in questions:
-            try:
-                # Get PDF URLs from question
-                pdf_urls = question.pdf_files if isinstance(question.pdf_files, list) else []
-                
-                if not pdf_urls:
-                    results['no_pdf'] += 1
-                    continue
-                
-                # Use first PDF URL
-                pdf_url = pdf_urls[0]
-                
-                # Check if already downloaded
-                existing_doc = DocumentFile.objects.filter(
-                    question=question,
-                    original_url=pdf_url,
-                    status='completed'
-                ).first()
-                
-                if existing_doc:
-                    results['already_downloaded'] += 1
-                    continue
-                
-                # Queue for download
-                doc_file = self.queue_question_pdf_download(question, pdf_url)
-                results['queued'] += 1
-                
-            except Exception as e:
-                error_msg = f"Q.{question.question_number}: {str(e)}"
-                results['errors'].append(error_msg)
-                logger.error(error_msg)
-        
-        return results
-    
-    def process_download_queue(self, max_items: int = 10) -> Dict:
-        """Process pending question downloads from queue"""
-        
-        # Get pending question downloads
-        pending_items = DownloadQueue.objects.filter(
-            status='queued',
-            document_file__document_category='parl_question'
-        ).order_by('priority', 'created_at')[:max_items]
-        
-        results = {
-            'processed': 0,
-            'successful': 0,
-            'failed': 0,
-            'errors': []
-        }
-        
-        for queue_item in pending_items:
-            try:
-                doc_file = queue_item.document_file
-                question = doc_file.question
-                
-                if not question:
-                    continue
-                
-                success = self.download_question_pdf(question, doc_file.original_url)
-                results['processed'] += 1
-                
-                if success:
-                    results['successful'] += 1
-                else:
-                    results['failed'] += 1
+        if use_celery:
+            # Use Celery for bulk download
+            question_ids = [q.id for q in questions]
+            
+            from .tasks import bulk_download_question_pdfs_task
+            
+            # Start Celery task
+            task = bulk_download_question_pdfs_task.delay(question_ids)
+            
+            return {
+                'total': len(questions),
+                'task_id': task.id,
+                'status': 'started',
+                'message': 'Bulk download started via Celery. Use task status endpoint to monitor progress.'
+            }
+        else:
+            # Original synchronous implementation
+            results = {
+                'total': len(questions),
+                'queued': 0,
+                'already_downloaded': 0,
+                'no_pdf': 0,
+                'errors': []
+            }
+            
+            for question in questions:
+                try:
+                    # Get PDF URLs from question
+                    pdf_urls = question.pdf_files if isinstance(question.pdf_files, list) else []
                     
-            except Exception as e:
-                error_msg = f"Queue item {queue_item.id}: {str(e)}"
-                results['errors'].append(error_msg)
-                results['failed'] += 1
-                logger.error(error_msg)
+                    if not pdf_urls:
+                        results['no_pdf'] += 1
+                        continue
+                    
+                    # Use first PDF URL
+                    pdf_url = pdf_urls[0]
+                    
+                    # Check if already downloaded
+                    existing_doc = DocumentFile.objects.filter(
+                        question=question,
+                        original_url=pdf_url,
+                        status='completed'
+                    ).first()
+                    
+                    if existing_doc:
+                        results['already_downloaded'] += 1
+                        continue
+                    
+                    # Queue for download
+                    doc_file = self.queue_question_pdf_download(question, pdf_url)
+                    results['queued'] += 1
+                    
+                except Exception as e:
+                    error_msg = f"Q.{question.question_number}: {str(e)}"
+                    results['errors'].append(error_msg)
+                    logger.error(error_msg)
+            
+            return results
+    
+    def process_download_queue(self, max_items: int = 10, use_celery: bool = True) -> Dict:
+        """Process pending question downloads from queue using Celery"""
         
-        return results
+        if use_celery:
+            # Use Celery for queue processing
+            from .tasks import process_download_queue_task
+            
+            # Start Celery task
+            task = process_download_queue_task.delay(max_items)
+            
+            return {
+                'task_id': task.id,
+                'status': 'started',
+                'max_items': max_items,
+                'message': 'Queue processing started via Celery. Use task status endpoint to monitor progress.'
+            }
+        else:
+            # Original synchronous implementation
+            # Get pending question downloads
+            pending_items = DownloadQueue.objects.filter(
+                status='queued',
+                document_file__document_category='parl_question'
+            ).order_by('priority', 'created_at')[:max_items]
+            
+            results = {
+                'processed': 0,
+                'successful': 0,
+                'failed': 0,
+                'errors': []
+            }
+            
+            for queue_item in pending_items:
+                try:
+                    doc_file = queue_item.document_file
+                    question = doc_file.question
+                    
+                    if not question:
+                        continue
+                    
+                    success = self.download_question_pdf(question, doc_file.original_url)
+                    results['processed'] += 1
+                    
+                    if success:
+                        results['successful'] += 1
+                    else:
+                        results['failed'] += 1
+                        
+                except Exception as e:
+                    error_msg = f"Queue item {queue_item.id}: {str(e)}"
+                    results['errors'].append(error_msg)
+                    results['failed'] += 1
+                    logger.error(error_msg)
+            
+            return results
     
     def _generate_filename(self, question: Question) -> str:
         """Generate consistent filename for question PDF"""

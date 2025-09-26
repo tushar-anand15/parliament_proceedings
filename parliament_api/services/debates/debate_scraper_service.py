@@ -61,7 +61,7 @@ class DebateScraperService:
                             job_name: Optional[str] = None,
                             download_pdfs: bool = True) -> ScrapingJob:
         """
-        Start scraping debates for specified Lok Sabha and session
+        Start scraping debates for specified Lok Sabha and session using Celery
         
         Args:
             loksabha_no: Lok Sabha number (e.g., "18")
@@ -93,7 +93,8 @@ class DebateScraperService:
             description=f"Scraping debates from {loksabha_no}th Lok Sabha Session {session_no}",
             job_type='debates',
             batch_size=self.config.default_batch_size if self.config else 10,
-            worker_count=self.config.default_workers if self.config else 3
+            worker_count=self.config.default_workers if self.config else 3,
+            status='pending'
         )
         
         # Add targets
@@ -102,13 +103,23 @@ class DebateScraperService:
         
         self.scraping_job = job
         
-        # Start scraping in background thread
-        scraping_thread = threading.Thread(
-            target=self._execute_debate_scraping,
-            args=(lok_sabha, session, start_date, end_date, download_pdfs),
-            daemon=True
+        # Start scraping using Celery task
+        from .tasks import scrape_debates_task
+        
+        task = scrape_debates_task.delay(
+            loksabha_no=loksabha_no,
+            session_no=session_no,
+            start_date=start_date,
+            end_date=end_date,
+            job_id=job.id,
+            download_pdfs=download_pdfs
         )
-        scraping_thread.start()
+        
+        # Store task ID in job for tracking
+        job.task_id = task.id
+        job.save()
+        
+        logger.info(f"Started Celery task {task.id} for job {job.id}")
         
         return job
     

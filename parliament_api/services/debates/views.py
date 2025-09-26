@@ -180,17 +180,21 @@ class StartDebateScrapingView(APIView):
                 'error': 'Both loksabha_no and session_no are required'
             }, status=400)
         
-        # Check for active debate scraping jobs
+        # Check for active debate scraping jobs (only block if same LS/Session combination)
+        # Allow parallel jobs for different LS/Session combinations
         active_jobs = ScrapingJob.objects.filter(
             status__in=['pending', 'running'],
             job_type='debates'
-        )
+        ).prefetch_related('target_lok_sabhas', 'target_sessions')
         
-        if active_jobs.exists():
-            return Response({
-                'error': 'Another debate scraping job is already running',
-                'active_job_id': active_jobs.first().id
-            }, status=400)
+        # Check if there's already a job for the same LS/Session combination
+        for job in active_jobs:
+            if (job.target_lok_sabhas.filter(number=loksabha_no).exists() and 
+                job.target_sessions.filter(session_number=session_no).exists()):
+                return Response({
+                    'error': f'Another debate scraping job is already running for LS{loksabha_no} Session {session_no}',
+                    'active_job_id': job.id
+                }, status=400)
         
         try:
             # Create and start scraping
@@ -207,6 +211,7 @@ class StartDebateScrapingView(APIView):
             return Response({
                 'message': 'Debate scraping job started successfully',
                 'job_id': job.id,
+                'task_id': job.task_id,
                 'job_name': job.name,
                 'status': 'pending',
                 'loksabha_no': loksabha_no,
@@ -214,12 +219,73 @@ class StartDebateScrapingView(APIView):
                 'start_date': start_date,
                 'end_date': end_date,
                 'download_pdfs': download_pdfs,
-                'note': 'Job is running in background. Use /api/debates/status/ to check progress.'
+                'note': 'Job is running in background via Celery. Use /api/debates/task-status/<task_id>/ to check progress.'
             })
             
         except Exception as e:
             return Response({
                 'error': f'Failed to start debate scraping: {str(e)}'
+            }, status=500)
+
+
+class CeleryTaskStatusView(APIView):
+    """Get Celery task status"""
+    permission_classes = []
+    
+    @extend_schema(
+        description="Get status of a Celery task",
+        tags=['Debates']
+    )
+    def get(self, request, task_id):
+        """Get task status"""
+        try:
+            from celery.result import AsyncResult
+            from .tasks import scrape_debates_task
+            
+            # Get task result
+            task_result = AsyncResult(task_id, app=scrape_debates_task.app)
+            
+            # Get job info if available
+            job = None
+            try:
+                job = ScrapingJob.objects.get(task_id=task_id)
+            except ScrapingJob.DoesNotExist:
+                pass
+            
+            response_data = {
+                'task_id': task_id,
+                'status': task_result.status,
+                'ready': task_result.ready(),
+                'successful': task_result.successful(),
+                'failed': task_result.failed(),
+            }
+            
+            if task_result.ready():
+                if task_result.successful():
+                    response_data['result'] = task_result.result
+                else:
+                    response_data['error'] = str(task_result.result)
+            else:
+                # Task is still running, get progress info
+                if hasattr(task_result, 'info') and task_result.info:
+                    response_data['info'] = task_result.info
+            
+            # Add job info if available
+            if job:
+                response_data['job'] = {
+                    'id': job.id,
+                    'name': job.name,
+                    'status': job.status,
+                    'created_at': job.created_at,
+                    'started_at': job.started_at,
+                    'completed_at': job.completed_at,
+                }
+            
+            return Response(response_data)
+            
+        except Exception as e:
+            return Response({
+                'error': f'Failed to get task status: {str(e)}'
             }, status=500)
 
 

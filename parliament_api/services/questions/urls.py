@@ -16,4 +16,10 @@ urlpatterns = [
     path('', include(router.urls)),
     # Additional custom endpoints
     path('stats/', views.question_stats, name='question-stats'),
+    
+    # Celery task endpoints
+    path('task-status/<str:task_id>/', views.QuestionCeleryTaskStatusView.as_view(), name='question-celery-task-status'),
+    path('bulk-download/', views.QuestionBulkDownloadView.as_view(), name='question-bulk-download'),
+    path('process-queue/', views.QuestionDownloadQueueView.as_view(), name='question-process-queue'),
+    path('download-statistics/', views.QuestionDownloadStatisticsView.as_view(), name='question-download-statistics'),
 ] 
