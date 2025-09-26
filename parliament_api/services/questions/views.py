@@ -4,10 +4,12 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.permissions import IsAuthenticated
 from drf_spectacular.utils import extend_schema, OpenApiParameter
 from drf_spectacular.types import OpenApiTypes
-from .models import Question, LokSabha, Session, Member, Ministry
+from .models import Question, QuestionMasterData, LokSabha, Session, Member, Ministry
 from .question_download_service import QuestionDownloadService
+from .master_data_service import QuestionMasterDataService
 
 
 class QuestionViewSet(viewsets.ModelViewSet):
@@ -192,7 +194,7 @@ def question_stats(request):
 
 class QuestionCeleryTaskStatusView(APIView):
     """Get Celery task status for questions"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]
     
     @extend_schema(
         description="Get status of a Celery task for questions",
@@ -235,7 +237,7 @@ class QuestionCeleryTaskStatusView(APIView):
 
 class QuestionBulkDownloadView(APIView):
     """Start bulk download of question PDFs using Celery"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]
     
     @extend_schema(
         description="Start bulk download of question PDFs",
@@ -276,7 +278,7 @@ class QuestionBulkDownloadView(APIView):
 
 class QuestionDownloadQueueView(APIView):
     """Process question download queue using Celery"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]
     
     @extend_schema(
         description="Process question download queue",
@@ -288,13 +290,26 @@ class QuestionDownloadQueueView(APIView):
             max_items = request.data.get('max_items', 10)
             use_celery = request.data.get('use_celery', True)
             
-            # Initialize service
-            service = QuestionDownloadService()
-            
-            # Process queue
-            result = service.process_download_queue(max_items, use_celery=use_celery)
-            
-            return Response(result)
+            if use_celery:
+                # Use Celery task
+                from .tasks import process_download_queue_task
+                
+                task = process_download_queue_task.delay(max_items)
+                
+                return Response({
+                    'task_id': task.id,
+                    'status': 'started',
+                    'message': f'Queue processing started via Celery for {max_items} items. Use task status endpoint to get results.'
+                })
+            else:
+                # Direct processing
+                service = QuestionDownloadService()
+                result = service.process_download_queue(max_items, use_celery=False)
+                
+                return Response({
+                    'status': 'completed',
+                    'result': result
+                })
             
         except Exception as e:
             return Response({
@@ -304,10 +319,10 @@ class QuestionDownloadQueueView(APIView):
 
 class QuestionDownloadStatisticsView(APIView):
     """Get question download statistics using Celery"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]
     
     @extend_schema(
-        description="Get question download statistics",
+        description="Get question download statistics including master data stats",
         tags=['Questions']
     )
     def get(self, request):
@@ -328,15 +343,556 @@ class QuestionDownloadStatisticsView(APIView):
                 })
             else:
                 # Direct calculation
-                service = QuestionDownloadService()
-                stats = service.get_download_statistics()
+                download_service = QuestionDownloadService()
+                download_stats = download_service.get_download_statistics()
+                
+                master_service = QuestionMasterDataService()
+                master_stats = master_service.get_master_data_statistics()
                 
                 return Response({
-                    'statistics': stats,
+                    'download_statistics': download_stats,
+                    'master_data_statistics': master_stats,
                     'calculated_at': 'real-time'
                 })
             
         except Exception as e:
             return Response({
                 'error': f'Failed to get download statistics: {str(e)}'
+            }, status=500)
+
+
+class QuestionPopulateView(APIView):
+    """Populate questions from external sansad.in API"""
+    permission_classes = [IsAuthenticated]
+    
+    @extend_schema(
+        description="Populate questions from external API and test download flow",
+        tags=['Questions']
+    )
+    def post(self, request):
+        """Populate questions from external API"""
+        try:
+            import requests
+            import uuid
+            from django.utils import timezone
+            
+            loksabha_no = request.data.get('loksabha_no', '18')
+            session_no = request.data.get('session_no', '5')
+            page_size = request.data.get('page_size', 10)
+            test_download = request.data.get('test_download', True)
+            
+            # Fetch from external API
+            external_url = f"https://sansad.in/api_ls/question/qetFilteredQuestionsAns?loksabhaNo={loksabha_no}&sessionNumber={session_no}&pageNo=1&locale=en&pageSize={page_size}"
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
+                'Accept': 'application/json, text/plain, */*',
+                'Referer': 'https://sansad.in/ls/questions/questions-and-answers'
+            }
+            
+            response = requests.get(external_url, headers=headers, timeout=30)
+            response.raise_for_status()
+            
+            data = response.json()
+            if not data or not isinstance(data, list) or not data[0].get('listOfQuestions'):
+                return Response({
+                    'error': 'Invalid response from external API'
+                }, status=400)
+            
+            questions_data = data[0]['listOfQuestions']
+            total_available = data[0].get('totalRecordSize', len(questions_data))
+            
+            # Get or create LokSabha and Session
+            lok_sabha, _ = LokSabha.objects.get_or_create(
+                number=loksabha_no,
+                defaults={'is_current': loksabha_no == '18'}
+            )
+            
+            session, _ = Session.objects.get_or_create(
+                lok_sabha=lok_sabha,
+                session_number=session_no,
+                defaults={'is_current': session_no == '5'}
+            )
+            
+            # Save questions to database
+            created_count = 0
+            updated_count = 0
+            
+            for q_data in questions_data:
+                question_data = {
+                    'question_id': str(uuid.uuid4()),
+                    'question_number': str(q_data.get('quesNo', '')),
+                    'question_type': q_data.get('type', 'STARRED'),
+                    'title': q_data.get('subjects', ''),
+                    'subject': q_data.get('subjects', ''),
+                    'lok_sabha': lok_sabha,
+                    'session': session,
+                    'pdf_files': [q_data.get('questionsFilePath', '')],
+                    'minister_names': [q_data.get('ministry', '')],
+                    'raw_api_data': q_data,
+                    'last_scraped': timezone.now()
+                }
+                
+                # Create or update question
+                question, created = Question.objects.get_or_create(
+                    question_number=question_data['question_number'],
+                    lok_sabha=lok_sabha,
+                    session=session,
+                    defaults=question_data
+                )
+                
+                if created:
+                    created_count += 1
+                else:
+                    # Update existing
+                    for key, value in question_data.items():
+                        if key not in ['question_number', 'lok_sabha', 'session']:
+                            setattr(question, key, value)
+                    question.save()
+                    updated_count += 1
+            
+            result = {
+                'status': 'SUCCESS',
+                'loksabha_no': loksabha_no,
+                'session_no': session_no,
+                'total_available': total_available,
+                'fetched': len(questions_data),
+                'created': created_count,
+                'updated': updated_count,
+                'message': f'Successfully populated {created_count} new and {updated_count} updated questions'
+            }
+            
+            # Test download flow if requested
+            if test_download and created_count > 0:
+                # Get the first created question and test download
+                test_question = Question.objects.filter(
+                    lok_sabha=lok_sabha,
+                    session=session
+                ).exclude(pdf_files__exact=[]).first()
+                
+                if test_question and test_question.pdf_files:
+                    try:
+                        service = QuestionDownloadService()
+                        pdf_url = test_question.pdf_files[0]
+                        
+                        # Test the download with GCS integration
+                        download_success = service.download_question_pdf(test_question, pdf_url)
+                        
+                        result['test_download'] = {
+                            'attempted': True,
+                            'success': download_success,
+                            'question_number': test_question.question_number,
+                            'pdf_url': pdf_url
+                        }
+                        
+                        if download_success:
+                            # Check if file was uploaded to GCS
+                            from services.files.models import DocumentFile
+                            doc_file = DocumentFile.objects.filter(question=test_question).first()
+                            if doc_file:
+                                result['test_download']['gcs_status'] = doc_file.gcs_upload_status
+                                result['test_download']['gcs_bucket'] = doc_file.gcs_bucket_name
+                                result['test_download']['gcs_object'] = doc_file.gcs_object_key
+                        
+                    except Exception as download_error:
+                        result['test_download'] = {
+                            'attempted': True,
+                            'success': False,
+                            'error': str(download_error)
+                        }
+            
+            return Response(result)
+            
+        except Exception as e:
+            return Response({
+                'error': f'Failed to populate questions: {str(e)}'
+            }, status=500)
+
+
+class QuestionMasterDataView(APIView):
+    """Manage master questions data from sansad.in API"""
+    permission_classes = [IsAuthenticated]
+    
+    @extend_schema(
+        description="Fetch Lok Sabha sessions metadata",
+        tags=['Questions Master Data']
+    )
+    def get(self, request):
+        """Get master data statistics"""
+        try:
+            service = QuestionMasterDataService()
+            stats = service.get_master_data_statistics()
+            
+            return Response({
+                'status': 'SUCCESS',
+                'statistics': stats
+            })
+            
+        except Exception as e:
+            return Response({
+                'error': f'Failed to get master data statistics: {str(e)}'
+            }, status=500)
+    
+    @extend_schema(
+        description="Fetch and store Lok Sabha sessions metadata",
+        tags=['Questions Master Data']
+    )
+    def post(self, request):
+        """Fetch Lok Sabha sessions from API"""
+        try:
+            action = request.data.get('action', 'fetch_sessions')
+            service = QuestionMasterDataService()
+            
+            if action == 'fetch_sessions':
+                result = service.fetch_lok_sabha_sessions()
+                return Response(result)
+            
+            elif action == 'fetch_questions_count':
+                result = service.fetch_questions_count_by_lok_sabha()
+                return Response(result)
+            
+            elif action == 'fetch_questions':
+                lok_sabha_number = request.data.get('lok_sabha_number', '18')
+                session_number = request.data.get('session_number', '5')
+                page_size = request.data.get('page_size', 10000)
+                
+                result = service.fetch_questions_for_session(
+                    lok_sabha_number, session_number, page_size
+                )
+                return Response(result)
+            
+            elif action == 'initialize_master_data':
+                force_update = request.data.get('force_update', False)
+                
+                result = service.initialize_master_data(force_update)
+                return Response(result)
+            
+            elif action == 'fetch_all_questions':
+                lok_sabha_numbers = request.data.get('lok_sabha_numbers')
+                max_sessions_per_lok_sabha = request.data.get('max_sessions_per_lok_sabha')
+                
+                result = service.fetch_all_questions(
+                    lok_sabha_numbers, max_sessions_per_lok_sabha
+                )
+                return Response(result)
+            
+            else:
+                return Response({
+                    'error': 'Invalid action. Supported actions: fetch_sessions, fetch_questions_count, fetch_questions, initialize_master_data, fetch_all_questions'
+                }, status=400)
+            
+        except Exception as e:
+            return Response({
+                'error': f'Failed to execute action {action}: {str(e)}'
+            }, status=500)
+
+
+class QuestionMasterDataBulkDownloadView(APIView):
+    """Start bulk download from master data"""
+    permission_classes = [IsAuthenticated]
+    
+    @extend_schema(
+        description="Start bulk download of question PDFs from master data",
+        tags=['Questions Master Data']
+    )
+    def post(self, request):
+        """Start bulk download from master data"""
+        try:
+            lok_sabha_number = request.data.get('lok_sabha_number')
+            session_number = request.data.get('session_number')
+            question_type = request.data.get('question_type')
+            limit = request.data.get('limit')
+            use_celery = request.data.get('use_celery', True)
+            
+            # Get master data service
+            master_service = QuestionMasterDataService()
+            
+            # Get questions for download
+            master_data_list = master_service.get_questions_for_download(
+                lok_sabha_number=lok_sabha_number,
+                session_number=session_number,
+                question_type=question_type,
+                limit=limit
+            )
+            
+            if not master_data_list:
+                return Response({
+                    'error': 'No questions found matching the criteria'
+                }, status=404)
+            
+            # Initialize download service
+            download_service = QuestionDownloadService()
+            
+            # Start bulk download
+            result = download_service.bulk_download_questions_from_master_data(
+                master_data_list, use_celery=use_celery
+            )
+            
+            return Response(result)
+            
+        except Exception as e:
+            return Response({
+                'error': f'Failed to start bulk download from master data: {str(e)}'
+            }, status=500)
+
+
+class QuestionMasterDataListView(APIView):
+    """List master questions data with filtering"""
+    permission_classes = [IsAuthenticated]
+    
+    @extend_schema(
+        description="List master questions data with filtering options",
+        parameters=[
+            OpenApiParameter(
+                name='lok_sabha_number',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                description='Filter by Lok Sabha number (e.g., 18)'
+            ),
+            OpenApiParameter(
+                name='session_number',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                description='Filter by session number (e.g., 5)'
+            ),
+            OpenApiParameter(
+                name='question_type',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                description='Filter by question type (STARRED, UNSTARRED)'
+            ),
+            OpenApiParameter(
+                name='is_processed',
+                type=OpenApiTypes.BOOL,
+                location=OpenApiParameter.QUERY,
+                description='Filter by processing status'
+            ),
+            OpenApiParameter(
+                name='limit',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                description='Limit number of results (default: 50)'
+            ),
+        ],
+        tags=['Questions Master Data']
+    )
+    def get(self, request):
+        """List master questions data"""
+        try:
+            # Get query parameters
+            lok_sabha_number = request.query_params.get('lok_sabha_number')
+            session_number = request.query_params.get('session_number')
+            question_type = request.query_params.get('question_type')
+            is_processed = request.query_params.get('is_processed')
+            limit = int(request.query_params.get('limit', 50))
+            
+            # Build queryset
+            queryset = QuestionMasterData.objects.all()
+            
+            if lok_sabha_number:
+                queryset = queryset.filter(lok_sabha_number=lok_sabha_number)
+            
+            if session_number:
+                queryset = queryset.filter(session_number=session_number)
+            
+            if question_type:
+                queryset = queryset.filter(question_type=question_type)
+            
+            if is_processed is not None:
+                is_processed_bool = is_processed.lower() == 'true'
+                queryset = queryset.filter(is_processed=is_processed_bool)
+            
+            # Apply ordering and limit
+            queryset = queryset.order_by('-date', '-question_number')[:limit]
+            
+            # Convert to list
+            master_data_list = []
+            for md in queryset:
+                master_data_list.append({
+                    'id': md.id,
+                    'question_number': md.question_number,
+                    'subjects': md.subjects,
+                    'lok_sabha_number': md.lok_sabha_number,
+                    'session_number': md.session_number,
+                    'question_type': md.question_type,
+                    'members': md.members,
+                    'ministry': md.ministry,
+                    'date': md.date.isoformat() if md.date else None,
+                    'has_pdf_url': bool(md.get_pdf_url()),
+                    'pdf_url': md.get_pdf_url(),
+                    'is_processed': md.is_processed,
+                    'processed_at': md.processed_at.isoformat() if md.processed_at else None,
+                    'last_fetched': md.last_fetched.isoformat() if md.last_fetched else None
+                })
+            
+            return Response({
+                'master_data': master_data_list,
+                'total_returned': len(master_data_list),
+                'filters_applied': {
+                    'lok_sabha_number': lok_sabha_number,
+                    'session_number': session_number,
+                    'question_type': question_type,
+                    'is_processed': is_processed,
+                    'limit': limit
+                }
+            })
+            
+        except Exception as e:
+            return Response({
+                'error': f'Failed to list master data: {str(e)}'
+            }, status=500)
+
+
+class QuestionSessionTestView(APIView):
+    """Session-based question testing endpoints"""
+    permission_classes = [IsAuthenticated]
+    
+    @extend_schema(
+        description="Get available sessions for testing",
+        tags=['Questions Testing']
+    )
+    def get(self, request):
+        """List all available sessions with question counts"""
+        try:
+            service = QuestionMasterDataService()
+            sessions = service.list_available_sessions()
+            
+            return Response({
+                'status': 'SUCCESS',
+                'total_sessions': len(sessions),
+                'sessions': sessions,
+                'message': f'Found {len(sessions)} sessions with question data'
+            })
+            
+        except Exception as e:
+            return Response({
+                'error': f'Failed to list available sessions: {str(e)}'
+            }, status=500)
+    
+    @extend_schema(
+        description="Test random questions from a specific session",
+        tags=['Questions Testing']
+    )
+    def post(self, request):
+        """Test random questions from a session"""
+        try:
+            lok_sabha_number = request.data.get('lok_sabha_number', '18')
+            session_number = request.data.get('session_number', '5')
+            question_count = request.data.get('question_count', 20)
+            download_pdfs = request.data.get('download_pdfs', True)
+            use_celery = request.data.get('use_celery', True)
+            
+            # Get master data service
+            master_service = QuestionMasterDataService()
+            
+            # Get session summary first
+            session_summary = master_service.get_session_summary(lok_sabha_number, session_number)
+            
+            # Get random questions directly from database
+            random_questions = QuestionMasterData.objects.filter(
+                lok_sabha_number=lok_sabha_number,
+                session_number=session_number
+            ).exclude(questions_file_path='').order_by('?')[:question_count]
+            
+            if not random_questions:
+                return Response({
+                    'error': f'No questions with PDF URLs found for LS{lok_sabha_number} Session{session_number}',
+                    'session_summary': session_summary
+                }, status=404)
+            
+            result = {
+                'status': 'SUCCESS',
+                'session_summary': session_summary,
+                'selected_questions': len(random_questions),
+                'questions': []
+            }
+            
+            # Add question details
+            for q in random_questions:
+                result['questions'].append({
+                    'id': q.id,
+                    'question_number': q.question_number,
+                    'subjects': q.subjects,
+                    'question_type': q.question_type,
+                    'ministry': q.ministry,
+                    'members': q.members,
+                    'pdf_url': q.get_pdf_url(),
+                    'date': q.date.isoformat() if q.date else None
+                })
+            
+            # If download requested, start bulk download
+            if download_pdfs:
+                download_service = QuestionDownloadService()
+                
+                # Convert to actual QuestionMasterData objects for download
+                master_data_objects = list(random_questions)
+                
+                download_result = download_service.bulk_download_questions_from_master_data(
+                    master_data_objects, use_celery=use_celery
+                )
+                
+                result['download_result'] = download_result
+            
+            return Response(result)
+            
+        except ValueError as e:
+            return Response({
+                'error': str(e)
+            }, status=404)
+        except Exception as e:
+            return Response({
+                'error': f'Failed to test session questions: {str(e)}'
+            }, status=500)
+
+
+class QuestionSessionSummaryView(APIView):
+    """Get detailed summary for a specific session"""
+    permission_classes = [IsAuthenticated]
+    
+    @extend_schema(
+        description="Get detailed summary for a specific session",
+        parameters=[
+            OpenApiParameter(
+                name='lok_sabha_number',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                description='Lok Sabha number (e.g., 18)',
+                required=True
+            ),
+            OpenApiParameter(
+                name='session_number',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                description='Session number (e.g., 5)',
+                required=True
+            ),
+        ],
+        tags=['Questions Testing']
+    )
+    def get(self, request):
+        """Get session summary"""
+        try:
+            lok_sabha_number = request.query_params.get('lok_sabha_number')
+            session_number = request.query_params.get('session_number')
+            
+            if not lok_sabha_number or not session_number:
+                return Response({
+                    'error': 'Both lok_sabha_number and session_number are required'
+                }, status=400)
+            
+            service = QuestionMasterDataService()
+            summary = service.get_session_summary(lok_sabha_number, session_number)
+            
+            return Response({
+                'status': 'SUCCESS',
+                'summary': summary
+            })
+            
+        except ValueError as e:
+            return Response({
+                'error': str(e)
+            }, status=404)
+        except Exception as e:
+            return Response({
+                'error': f'Failed to get session summary: {str(e)}'
             }, status=500)

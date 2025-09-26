@@ -72,6 +72,16 @@ redis_running() {
     redis-cli ping >/dev/null 2>&1
 }
 
+# Check if PostgreSQL is running
+postgres_running() {
+    if command_exists pg_isready; then
+        pg_isready >/dev/null 2>&1
+    else
+        # Fallback: try to connect
+        psql -h localhost -U postgres -c '\q' >/dev/null 2>&1
+    fi
+}
+
 # Check if port is in use
 port_in_use() {
     if command_exists lsof; then
@@ -190,7 +200,26 @@ show_status() {
         echo -e "  ${RED}✗${NC} Django API       - Stopped"
     fi
     
+    echo -e "\n${WHITE}Database & Cache Status:${NC}"
+    if postgres_running; then
+        echo -e "  ${GREEN}✓${NC} PostgreSQL       - Running"
+    else
+        echo -e "  ${RED}✗${NC} PostgreSQL       - Not running"
+    fi
+    
+    if redis_running; then
+        echo -e "  ${GREEN}✓${NC} Redis Server     - Running"
+    else
+        echo -e "  ${RED}✗${NC} Redis Server     - Not running"
+    fi
+    
     echo -e "\n${WHITE}Port Status:${NC}"
+    if port_in_use 5432; then
+        echo -e "  ${GREEN}✓${NC} PostgreSQL 5432  - In use"
+    else
+        echo -e "  ${RED}✗${NC} PostgreSQL 5432  - Free"
+    fi
+    
     if port_in_use 6379; then
         echo -e "  ${GREEN}✓${NC} Redis Port 6379  - In use"
     else
@@ -284,6 +313,31 @@ start_services() {
         fi
     fi
     
+    # Check PostgreSQL
+    if ! command_exists psql; then
+        print_warning "PostgreSQL not found. Attempting to install..."
+        if command_exists brew; then
+            print_info "Installing PostgreSQL via Homebrew..."
+            brew install postgresql
+            print_info "Starting PostgreSQL service..."
+            brew services start postgresql
+        elif command_exists apt-get; then
+            print_info "Installing PostgreSQL via apt..."
+            sudo apt-get update && sudo apt-get install -y postgresql postgresql-contrib
+            sudo systemctl start postgresql
+            sudo systemctl enable postgresql
+        elif command_exists yum; then
+            print_info "Installing PostgreSQL via yum..."
+            sudo yum install -y postgresql postgresql-server postgresql-contrib
+            sudo postgresql-setup initdb
+            sudo systemctl start postgresql
+            sudo systemctl enable postgresql
+        else
+            print_error "Please install PostgreSQL manually"
+            exit 1
+        fi
+    fi
+    
     show_progress 2 11 "Requirements checked"
     print_status "System requirements satisfied"
     
@@ -318,6 +372,34 @@ start_services() {
     show_progress 5 11 "Packages installed"
     print_status "Python packages installed/updated"
     
+    # Setup PostgreSQL database and user
+    print_info "Setting up PostgreSQL database..."
+    
+    # Load environment variables
+    if [ -f "../.env" ]; then
+        export $(grep -v '^#' ../.env | xargs)
+    fi
+    
+    # Create database and user if they don't exist
+    DB_NAME=${DB_NAME:-parliament_api}
+    DB_USER=${DB_USER:-parliament_user}
+    DB_PASSWORD=${DB_PASSWORD:-***REMOVED_SECRET***}
+    
+    # Check if database exists, create if not
+    if ! psql -lqt | cut -d \| -f 1 | grep -qw "$DB_NAME" 2>/dev/null; then
+        print_info "Creating PostgreSQL database and user..."
+        
+        # Create user and database
+        psql postgres -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASSWORD';" 2>/dev/null || true
+        psql postgres -c "ALTER USER $DB_USER CREATEDB;" 2>/dev/null || true
+        psql postgres -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" 2>/dev/null || true
+        psql postgres -c "GRANT ALL PRIVILEGES ON DATABASE $DB_NAME TO $DB_USER;" 2>/dev/null || true
+        
+        print_status "PostgreSQL database and user created"
+    else
+        print_status "PostgreSQL database already exists"
+    fi
+    
     # Run Django migrations
     print_info "Running Django migrations..."
     python manage.py migrate >/dev/null 2>&1
@@ -344,6 +426,21 @@ start_services() {
         sleep 2
     fi
     
+    # Ensure PostgreSQL is running
+    print_info "Ensuring PostgreSQL is running..."
+    if ! postgres_running; then
+        print_info "Starting PostgreSQL service..."
+        if command_exists brew; then
+            brew services start postgresql
+        elif command_exists systemctl; then
+            sudo systemctl start postgresql
+        else
+            print_warning "Please start PostgreSQL manually"
+        fi
+        sleep 2
+    fi
+    print_status "PostgreSQL is running"
+    
     # Start Redis in tmux session
     print_info "Starting Redis server..."
     tmux new-session -d -s "parliament-redis" -c "$(pwd)"
@@ -354,11 +451,12 @@ start_services() {
     
     # Start Celery worker in tmux session
     print_info "Starting Celery worker..."
+    CELERY_CONCURRENCY=${CELERY_WORKER_CONCURRENCY:-8}
     tmux new-session -d -s "parliament-celery" -c "$(pwd)"
-    tmux send-keys -t "parliament-celery" "source ../env/bin/activate && celery -A parliament_api worker --loglevel=info" Enter
+    tmux send-keys -t "parliament-celery" "source ../env/bin/activate && celery -A parliament_api worker --loglevel=info --concurrency=$CELERY_CONCURRENCY" Enter
     sleep 3
     show_progress 8 11 "Celery started"
-    print_status "Celery worker started in tmux session 'parliament-celery'"
+    print_status "Celery worker started in tmux session 'parliament-celery' (concurrency: $CELERY_CONCURRENCY)"
     
     # Start Celery Flower monitoring
     print_info "Starting Celery Flower monitoring..."

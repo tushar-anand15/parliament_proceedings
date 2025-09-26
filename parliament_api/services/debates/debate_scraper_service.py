@@ -21,6 +21,7 @@ if scraper_path not in sys.path:
 from services.questions.models import LokSabha, Session
 from services.files.models import DocumentFile, DownloadQueue
 from services.scraper.models import ScrapingJob, ScrapingError, ScrapingConfig, DataSource
+from services.cloud_storage.gcs_service import GCSService
 from .models import Debate, DebateSpeech, DebateTag, SessionDateCache
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ class DebateScraperService:
         self.base_url = "https://sansad.in/api_ls"
         self.session = requests.Session()
         self.config = ScrapingConfig.get_default()
+        self.gcs_service = GCSService()
         
         # Set headers for API requests
         self.session.headers.update({
@@ -260,6 +262,149 @@ class DebateScraperService:
         
         logger.error(f"All methods failed to fetch session dates for {loksabha_no}th LS Session {session_no}")
         return []
+    
+    def discover_all_available_sessions(self) -> List[Dict]:
+        """Discover all available sessions from both modern and historical APIs"""
+        all_sessions = []
+        
+        # Method 1: Get modern sessions (LS13+) from main Parliament API
+        try:
+            url = f"{self.base_url}/business/AllLoksabhaAndSessionDates"
+            response = self.session.get(url, timeout=30)
+            response.raise_for_status()
+            
+            data = response.json()
+            for ls_data in data:
+                loksabha_no = str(ls_data.get('loksabha'))
+                for session_data in ls_data.get('sessions', []):
+                    session_no = str(session_data.get('sessionNo'))
+                    dates = session_data.get('dates', [])
+                    
+                    if dates:
+                        all_sessions.append({
+                            'loksabha_no': loksabha_no,
+                            'session_no': session_no,
+                            'available_dates': dates,
+                            'date_count': len(dates),
+                            'api_source': 'sansad.in'
+                        })
+            
+            logger.info(f"Found {len(all_sessions)} modern sessions from Parliament API")
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch modern sessions: {e}")
+        
+        # Method 2: Get historical sessions (LS01-LS12) from eparlib API
+        historical_sessions = self._discover_historical_sessions()
+        all_sessions.extend(historical_sessions)
+        
+        logger.info(f"Total sessions discovered: {len(all_sessions)}")
+        return all_sessions
+    
+    def _discover_historical_sessions(self) -> List[Dict]:
+        """Discover historical sessions from eparlib API"""
+        historical_sessions = []
+        
+        for ls_num in range(1, 13):  # LS01 to LS12
+            ls_padded = str(ls_num).zfill(2)
+            
+            try:
+                # Get available sessions for this LS
+                url = "https://eparlib.sansad.in/restv3/field/browse"
+                params = {
+                    'field': 'sessionNo',
+                    'collectionId': '2',
+                    'loksabhaNo': ls_padded,
+                    'order': 'desc',
+                    'start': '0',
+                    'rows': '100',
+                    'locale': 'en'
+                }
+                
+                headers = {
+                    'Accept': 'application/json, text/plain, */*',
+                    'Origin': 'https://sansad.in',
+                    'Referer': 'https://sansad.in/',
+                    'User-Agent': self.session.headers['User-Agent']
+                }
+                
+                response = self.session.get(url, params=params, headers=headers, timeout=30)
+                response.raise_for_status()
+                
+                data = response.json()
+                sessions = data.get('records', [])
+                
+                for session_record in sessions:
+                    session_name = session_record.get('name')
+                    session_count = int(session_record.get('count', 0))
+                    
+                    if session_count > 0:
+                        # Get sample dates for this session
+                        dates = self._get_eparlib_session_dates_direct(ls_padded, session_name, limit=5)
+                        
+                        if dates:
+                            historical_sessions.append({
+                                'loksabha_no': str(ls_num),
+                                'session_no': session_name,
+                                'available_dates': dates,
+                                'date_count': len(dates),
+                                'total_debates': session_count,
+                                'api_source': 'eparlib'
+                            })
+                
+                if sessions:
+                    logger.info(f"Discovered {len(sessions)} historical sessions for LS{ls_num}")
+                
+            except Exception as e:
+                logger.warning(f"Failed to discover historical sessions for LS{ls_num}: {e}")
+                continue
+        
+        logger.info(f"Total historical sessions discovered: {len(historical_sessions)}")
+        return historical_sessions
+    
+    def _get_eparlib_session_dates_direct(self, loksabha_no: str, session_no: str, limit: int = 10) -> List[str]:
+        """Get dates directly from eparlib for a specific session"""
+        try:
+            url = "https://eparlib.sansad.in/restv3/field/browse"
+            params = {
+                'field': 'date',
+                'collectionId': '2',
+                'loksabhaNo': loksabha_no,
+                'sessionNo': session_no,
+                'order': 'desc',
+                'start': '0',
+                'rows': str(limit),
+                'locale': 'en'
+            }
+            
+            headers = {
+                'Accept': 'application/json, text/plain, */*',
+                'Origin': 'https://sansad.in',
+                'Referer': 'https://sansad.in/',
+                'User-Agent': self.session.headers['User-Agent']
+            }
+            
+            response = self.session.get(url, params=params, headers=headers, timeout=30)
+            response.raise_for_status()
+            
+            data = response.json()
+            raw_dates = [record['name'] for record in data.get('records', [])]
+            
+            # Convert YYYY-MM-DD to DD/MM/YYYY format
+            converted_dates = []
+            for date_str in raw_dates:
+                try:
+                    year, month, day = date_str.split('-')
+                    converted_date = f"{day}/{month}/{year}"
+                    converted_dates.append(converted_date)
+                except ValueError:
+                    continue
+            
+            return converted_dates
+            
+        except Exception as e:
+            logger.warning(f"Failed to get dates for LS{loksabha_no} Session {session_no}: {e}")
+            return []
     
     def _get_session_dates_sansad_api(self, loksabha_no: str, session_no: str, lok_sabha, session_obj) -> List[str]:
         """Get session dates from the original sansad.in API"""
@@ -524,6 +669,19 @@ class DebateScraperService:
     def _fetch_debate_info_sansad_api(self, loksabha_no: str, session_no: str, date: str, locale: str = "en") -> Dict:
         """Fetch debate info from sansad.in API with session format fallback"""
         
+        # Convert date from DD/MM/YYYY to M/D/YYYY format for sansad API
+        try:
+            date_parts = date.split('/')
+            if len(date_parts) == 3:
+                day, month, year = date_parts
+                sansad_date = f"{int(month)}/{int(day)}/{year}"  # M/D/YYYY format
+            else:
+                logger.warning(f"Invalid date format for sansad API: {date}")
+                return {}
+        except ValueError as e:
+            logger.warning(f"Date conversion error for sansad API: {date} - {e}")
+            return {}
+        
         # Generate both possible session number formats
         session_formats = []
         
@@ -540,12 +698,12 @@ class DebateScraperService:
                 session_formats = [session_no]
         
         # Try each format until one works
-        logger.info(f"Sansad API: Will try session formats: {session_formats}")
+        logger.info(f"Sansad API: Will try session formats: {session_formats} with date {sansad_date}")
         
         for i, session_format in enumerate(session_formats, 1):
             try:
                 logger.info(f"Sansad API: [{i}/{len(session_formats)}] Trying session format: '{session_format}'")
-                debate_info = self._fetch_debate_info(loksabha_no, session_format, date, locale)
+                debate_info = self._fetch_debate_info(loksabha_no, session_format, sansad_date, locale)
                 
                 # Check if we got a valid response with actual content
                 if debate_info and isinstance(debate_info, dict):
@@ -571,10 +729,10 @@ class DebateScraperService:
         base_url = "https://eparlib.sansad.in/restv3"
         
         try:
-            # Convert date from m/d/yyyy to yyyy-mm-dd format for eparlib API
+            # Convert date from dd/mm/yyyy to yyyy-mm-dd format for eparlib API
             date_parts = date.split('/')
             if len(date_parts) == 3:
-                month, day, year = date_parts
+                day, month, year = date_parts  # Fixed: DD/MM/YYYY format
                 eparlib_date = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
             else:
                 logger.warning(f"Invalid date format for eparlib API: {date}")
@@ -731,7 +889,7 @@ class DebateScraperService:
         return debate, created
     
     def _queue_pdf_download(self, debate: Debate):
-        """Queue PDF for download"""
+        """Queue PDF for download and process immediately"""
         
         # Create document file record
         doc_file, created = DocumentFile.objects.get_or_create(
@@ -749,132 +907,227 @@ class DebateScraperService:
         debate.pdf_file = doc_file
         debate.save()
         
-        # Create download queue entry
-        DownloadQueue.objects.create(
+        # Create download queue entry for tracking
+        queue_entry = DownloadQueue.objects.create(
             document_file=doc_file,
             priority=5
         )
         
         logger.info(f"Queued PDF download for debate {debate.debate_id}")
+        
+        # Immediately process the download with GCS integration
+        try:
+            queue_entry.mark_started('debate_scraper_service')
+            success = self.download_debate_pdf(debate)
+            
+            if success:
+                queue_entry.mark_completed()
+                logger.info(f"Successfully processed PDF download for debate {debate.debate_id}")
+            else:
+                queue_entry.mark_failed("Download failed")
+                logger.error(f"Failed to process PDF download for debate {debate.debate_id}")
+                
+        except Exception as e:
+            queue_entry.mark_failed(str(e))
+            logger.error(f"Error processing PDF download for debate {debate.debate_id}: {e}")
+            raise
     
     def download_debate_pdf(self, debate: Debate) -> bool:
-        """Download PDF for a specific debate"""
+        """Download PDF for a specific debate with exponential backoff retry"""
         
         if not debate.pdf_url:
             logger.warning(f"No PDF URL for debate {debate.debate_id}")
             return False
         
-        try:
-            logger.info(f"Downloading PDF from {debate.pdf_url}")
-            
-            # Update status
-            debate.status = 'downloading'
-            debate.download_attempts += 1
-            debate.last_download_attempt = timezone.now()
-            debate.save()
-            
-            # Set proper headers for PDF download to avoid 403 errors
-            pdf_headers = {
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Connection': 'keep-alive',
-                'Referer': 'https://sansad.in/' if 'sansad.in' in debate.pdf_url else 'https://eparlib.sansad.in/',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'same-origin',
-                'Sec-GPC': '1',
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
-                'sec-ch-ua': '"Chromium";v="140", "Not=A?Brand";v="24", "Brave";v="140"',
-                'sec-ch-ua-mobile': '?0',
-                'sec-ch-ua-platform': '"macOS"',
-                'Upgrade-Insecure-Requests': '1'
-            }
-            
-            # URL encode the PDF URL to handle spaces and special characters
-            from urllib.parse import quote
-            
-            # Split URL and encode path properly
-            if '?' in debate.pdf_url:
-                base_url, params = debate.pdf_url.split('?', 1)
-                # Only encode the path part, not the domain
-                url_parts = base_url.split('/')
-                encoded_parts = url_parts[:3] + [quote(part, safe='') for part in url_parts[3:]]
-                encoded_url = '/'.join(encoded_parts) + '?' + params
-            else:
-                url_parts = debate.pdf_url.split('/')
-                encoded_parts = url_parts[:3] + [quote(part, safe='') for part in url_parts[3:]]
-                encoded_url = '/'.join(encoded_parts)
-            
-            logger.info(f"Downloading from encoded URL: {encoded_url}")
-            
-            # Download PDF with proper headers
-            response = self.session.get(encoded_url, headers=pdf_headers, timeout=60, stream=True)
-            
-            # If we get 403, try to establish session by visiting the main page first
-            if response.status_code == 403:
-                logger.info("PDF access forbidden, attempting to establish session...")
+        max_retries = 3
+        base_delay = 1  # Start with 1 second
+        
+        for attempt in range(max_retries):
+            try:
+                # Calculate exponential backoff delay
+                if attempt > 0:
+                    delay = base_delay * (2 ** (attempt - 1))  # 1s, 2s, 4s
+                    logger.info(f"Retry attempt {attempt + 1}/{max_retries} for {debate.debate_id} after {delay}s delay")
+                    time.sleep(delay)
+                else:
+                    logger.info(f"Downloading PDF from {debate.pdf_url} (attempt {attempt + 1}/{max_retries})")
                 
-                # Visit main debates page to establish session
-                session_headers = {
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                # Update status and attempt count
+                debate.status = 'downloading'
+                debate.download_attempts += 1
+                debate.last_download_attempt = timezone.now()
+                debate.save()
+                
+                # Set proper headers for PDF download to avoid 403 errors
+                pdf_headers = {
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
                     'Accept-Language': 'en-US,en;q=0.9',
                     'Connection': 'keep-alive',
-                    'User-Agent': pdf_headers['User-Agent'],
+                    'Referer': 'https://sansad.in/' if 'sansad.in' in debate.pdf_url else 'https://eparlib.sansad.in/',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'same-origin',
+                    'Sec-GPC': '1',
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
+                    'sec-ch-ua': '"Chromium";v="140", "Not=A?Brand";v="24", "Brave";v="140"',
+                    'sec-ch-ua-mobile': '?0',
+                    'sec-ch-ua-platform': '"macOS"',
                     'Upgrade-Insecure-Requests': '1'
                 }
                 
-                try:
-                    # Visit main page to get session cookies
-                    session_resp = self.session.get('https://sansad.in/ls/debates/text-of-debates', headers=session_headers, timeout=30)
-                    if session_resp.status_code == 200:
-                        logger.info("Session established, retrying PDF download...")
-                        # Retry PDF download with updated session
-                        response = self.session.get(encoded_url, headers=pdf_headers, timeout=60, stream=True)
-                except Exception as e:
-                    logger.warning(f"Failed to establish session: {e}")
-            
-            response.raise_for_status()
-            
-            # Save to file
-            file_name = debate.get_pdf_filename()
-            file_path = os.path.join(settings.MEDIA_ROOT, 'debates', file_name)
-            
-            # Create directory if needed
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            
-            # Write file
-            with open(file_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            
-            # Get file size
-            file_size = os.path.getsize(file_path)
-            
-            # Update debate record
-            debate.status = 'completed'
-            debate.file_size = file_size
-            debate.save()
-            
-            # Update document file if exists
-            if debate.pdf_file:
-                debate.pdf_file.file_path = f'debates/{file_name}'
-                debate.pdf_file.file_size = file_size
-                debate.pdf_file.status = 'completed'
-                debate.pdf_file.downloaded_at = timezone.now()
-                debate.pdf_file.save()
-            
-            logger.info(f"Successfully downloaded debate PDF: {file_name} ({file_size} bytes)")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to download debate PDF: {e}")
-            
-            # Update status
-            debate.status = 'failed'
-            debate.error_message = str(e)
-            debate.save()
-            
-            return False
+                # URL encode the PDF URL to handle spaces and special characters
+                from urllib.parse import quote
+                
+                # Split URL and encode path properly
+                if '?' in debate.pdf_url:
+                    base_url, params = debate.pdf_url.split('?', 1)
+                    # Only encode the path part, not the domain
+                    url_parts = base_url.split('/')
+                    encoded_parts = url_parts[:3] + [quote(part, safe='') for part in url_parts[3:]]
+                    encoded_url = '/'.join(encoded_parts) + '?' + params
+                else:
+                    url_parts = debate.pdf_url.split('/')
+                    encoded_parts = url_parts[:3] + [quote(part, safe='') for part in url_parts[3:]]
+                    encoded_url = '/'.join(encoded_parts)
+                
+                logger.info(f"Downloading from encoded URL: {encoded_url}")
+                
+                # Download PDF with proper headers
+                response = self.session.get(encoded_url, headers=pdf_headers, timeout=60, stream=True)
+                
+                # If we get 403, try to establish session by visiting the main page first
+                if response.status_code == 403:
+                    logger.info("PDF access forbidden, attempting to establish session...")
+                    
+                    # Visit main debates page to establish session
+                    session_headers = {
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Connection': 'keep-alive',
+                        'User-Agent': pdf_headers['User-Agent'],
+                        'Upgrade-Insecure-Requests': '1'
+                    }
+                    
+                    try:
+                        # Visit main page to get session cookies
+                        session_resp = self.session.get('https://sansad.in/ls/debates/text-of-debates', headers=session_headers, timeout=30)
+                        if session_resp.status_code == 200:
+                            logger.info("Session established, retrying PDF download...")
+                            # Retry PDF download with updated session
+                            response = self.session.get(encoded_url, headers=pdf_headers, timeout=60, stream=True)
+                    except Exception as e:
+                        logger.warning(f"Failed to establish session: {e}")
+                
+                response.raise_for_status()
+                
+                # Save to file
+                file_name = debate.get_pdf_filename()
+                file_path = os.path.join(settings.MEDIA_ROOT, 'debates', file_name)
+                
+                # Create directory if needed
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                
+                # Write file
+                with open(file_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                
+                # Get file size
+                file_size = os.path.getsize(file_path)
+                
+                # Update debate record
+                debate.status = 'completed'
+                debate.file_size = file_size
+                debate.save()
+                
+                # Update document file if exists
+                if debate.pdf_file:
+                    debate.pdf_file.file_path = f'debates/{file_name}'
+                    debate.pdf_file.file_size = file_size
+                    debate.pdf_file.status = 'completed'
+                    debate.pdf_file.downloaded_at = timezone.now()
+                    debate.pdf_file.save()
+                    
+                    # Upload to Google Cloud Storage
+                    try:
+                        bucket_name = self.gcs_service.get_bucket_for_document_type('parl_debate')
+                        object_key = self.gcs_service.generate_object_key('parl_debate', file_name)
+                        
+                        # Update GCS upload status
+                        debate.pdf_file.gcs_upload_status = 'uploading'
+                        debate.pdf_file.gcs_bucket_name = bucket_name
+                        debate.pdf_file.gcs_object_key = object_key
+                        debate.pdf_file.save()
+                        
+                        # Upload to GCS
+                        upload_result = self.gcs_service.upload_file(
+                            file_path,
+                            bucket_name,
+                            object_key,
+                            metadata={
+                                'debate_id': debate.debate_id,
+                                'lok_sabha': str(debate.lok_sabha.number),
+                                'session': str(debate.session.session_number),
+                                'debate_date': debate.debate_date.isoformat(),
+                                'document_type': 'parliamentary_debate',
+                                'uploaded_by': 'debate_scraper_service'
+                            }
+                        )
+                        
+                        if upload_result['success']:
+                            # Update GCS metadata
+                            debate.pdf_file.gcs_upload_status = 'completed'
+                            debate.pdf_file.gcs_uploaded_at = timezone.now()
+                            debate.pdf_file.gcs_etag = upload_result.get('etag', '')
+                            debate.pdf_file.gcs_url = upload_result.get('gcs_url', '')
+                            debate.pdf_file.save()
+                            
+                            # Delete local file if configured to do so
+                            if settings.GCS_AUTO_DELETE_LOCAL:
+                                try:
+                                    os.remove(file_path)
+                                    debate.pdf_file.file_path = None
+                                    debate.pdf_file.save()
+                                    logger.info(f"Deleted local file after GCS upload: {file_path}")
+                                except Exception as delete_error:
+                                    logger.warning(f"Failed to delete local file: {delete_error}")
+                            
+                            logger.info(f"Successfully uploaded debate PDF to GCS: {object_key}")
+                        else:
+                            debate.pdf_file.gcs_upload_status = 'failed'
+                            debate.pdf_file.save()
+                            logger.error(f"Failed to upload to GCS: {upload_result.get('error')}")
+                            
+                    except Exception as gcs_error:
+                        logger.error(f"GCS upload error: {gcs_error}")
+                        debate.pdf_file.gcs_upload_status = 'failed'
+                        debate.pdf_file.save()
+                
+                logger.info(f"Successfully downloaded debate PDF: {file_name} ({file_size} bytes) on attempt {attempt + 1}")
+                return True
+                
+            except (requests.exceptions.RequestException, requests.exceptions.Timeout, 
+                    requests.exceptions.ConnectionError, requests.exceptions.HTTPError) as e:
+                logger.warning(f"Download attempt {attempt + 1}/{max_retries} failed for {debate.debate_id}: {e}")
+                
+                if attempt == max_retries - 1:  # Last attempt
+                    logger.error(f"All {max_retries} download attempts failed for {debate.debate_id}")
+                    debate.status = 'failed'
+                    debate.error_message = f"Download failed after {max_retries} attempts: {str(e)}"
+                    debate.save()
+                    return False
+                # Continue to next attempt
+                continue
+                
+            except Exception as e:
+                logger.error(f"Unexpected error downloading debate PDF {debate.debate_id}: {e}")
+                debate.status = 'failed'
+                debate.error_message = str(e)
+                debate.save()
+                return False
+        
+        # Should never reach here, but just in case
+        return False
     
     def get_debate_statistics(self, loksabha_no: Optional[str] = None, session_no: Optional[str] = None) -> Dict:
         """Get statistics about debates"""

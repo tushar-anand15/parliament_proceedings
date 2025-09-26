@@ -7,8 +7,9 @@ from typing import List, Dict, Optional
 from django.utils import timezone
 from django.conf import settings
 
-from .models import Question
+from .models import Question, QuestionMasterData
 from services.files.models import DocumentFile, DownloadQueue
+from services.cloud_storage.gcs_service import GCSService
 
 logger = logging.getLogger(__name__)
 
@@ -20,10 +21,20 @@ class QuestionDownloadService:
     
     def __init__(self):
         self.session = requests.Session()
-        # Set headers similar to debate scraper
+        # Set headers for both modern and legacy PDF downloads
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36'
+            'Accept': 'application/pdf,*/*',
+            'Referer': 'https://sansad.in/ls/questions/questions-and-answers',
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
+            'sec-ch-ua': '"Chromium";v="140", "Not=A?Brand";v="24", "Brave";v="140"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"macOS"'
         })
+        self.gcs_service = GCSService()
+    
+    def _generate_filename(self, question: Question) -> str:
+        """Generate consistent filename for question PDF"""
+        return f"question_{question.question_number}_{question.question_type.lower()}.pdf"
     
     def queue_question_pdf_download(self, question: Question, pdf_url: str) -> DocumentFile:
         """Queue a question PDF for download using the existing infrastructure"""
@@ -77,25 +88,39 @@ class QuestionDownloadService:
             doc_file.last_download_attempt = timezone.now()
             doc_file.save()
             
-            # Download PDF with retry logic for SSL issues
+            # Download PDF with exponential backoff retry logic
             max_retries = 3
+            base_delay = 1  # Start with 1 second
+            
             for attempt in range(max_retries):
                 try:
+                    # Calculate exponential backoff delay
+                    if attempt > 0:
+                        delay = base_delay * (2 ** (attempt - 1))  # 1s, 2s, 4s
+                        logger.info(f"Retry attempt {attempt + 1}/{max_retries} for question {question.question_number} after {delay}s delay")
+                        time.sleep(delay)
+                    else:
+                        logger.info(f"Downloading question PDF from {pdf_url} (attempt {attempt + 1}/{max_retries})")
+                    
                     response = self.session.get(pdf_url, timeout=30, stream=True, verify=True)
                     response.raise_for_status()
-                    break
-                except requests.exceptions.SSLError as ssl_error:
-                    if attempt < max_retries - 1:
-                        logger.warning(f"SSL error on attempt {attempt + 1}, retrying: {ssl_error}")
-                        time.sleep(1)  # Brief delay before retry
-                        continue
-                    else:
-                        logger.error(f"SSL error after {max_retries} attempts: {ssl_error}")
+                    break  # Success, exit retry loop
+                    
+                except (requests.exceptions.SSLError, requests.exceptions.ConnectionError, 
+                        requests.exceptions.Timeout, requests.exceptions.HTTPError) as network_error:
+                    logger.warning(f"Network error on attempt {attempt + 1}/{max_retries} for question {question.question_number}: {network_error}")
+                    
+                    if attempt == max_retries - 1:  # Last attempt
+                        logger.error(f"All {max_retries} download attempts failed for question {question.question_number}")
                         raise
+                    # Continue to next attempt
+                    continue
+                    
                 except Exception as e:
-                    logger.error(f"Download error on attempt {attempt + 1}: {e}")
+                    logger.error(f"Unexpected error on attempt {attempt + 1} for question {question.question_number}: {e}")
                     if attempt < max_retries - 1:
-                        time.sleep(1)
+                        delay = base_delay * (2 ** attempt)
+                        time.sleep(delay)
                         continue
                     else:
                         raise
@@ -122,6 +147,59 @@ class QuestionDownloadService:
             doc_file.downloaded_at = timezone.now()
             doc_file.save()
             
+            # Upload to Google Cloud Storage
+            try:
+                bucket_name = self.gcs_service.get_bucket_for_document_type('parl_question')
+                object_key = self.gcs_service.generate_object_key('parl_question', file_name)
+                
+                # Update GCS upload status
+                doc_file.gcs_upload_status = 'uploading'
+                doc_file.gcs_bucket_name = bucket_name
+                doc_file.gcs_object_key = object_key
+                doc_file.save()
+                
+                # Upload to GCS
+                upload_result = self.gcs_service.upload_file(
+                    file_path,
+                    bucket_name,
+                    object_key,
+                    metadata={
+                        'question_id': question.question_id,
+                        'question_number': question.question_number,
+                        'document_type': 'parliamentary_question',
+                        'uploaded_by': 'question_download_service'
+                    }
+                )
+                
+                if upload_result['success']:
+                    # Update GCS metadata
+                    doc_file.gcs_upload_status = 'completed'
+                    doc_file.gcs_uploaded_at = timezone.now()
+                    doc_file.gcs_etag = upload_result.get('etag', '')
+                    doc_file.gcs_url = upload_result.get('gcs_url', '')
+                    doc_file.save()
+                    
+                    # Delete local file if configured to do so
+                    if settings.GCS_AUTO_DELETE_LOCAL:
+                        try:
+                            os.remove(file_path)
+                            doc_file.file_path = None
+                            doc_file.save()
+                            logger.info(f"Deleted local file after GCS upload: {file_path}")
+                        except Exception as delete_error:
+                            logger.warning(f"Failed to delete local file: {delete_error}")
+                    
+                    logger.info(f"Successfully uploaded question PDF to GCS: {object_key}")
+                else:
+                    doc_file.gcs_upload_status = 'failed'
+                    doc_file.save()
+                    logger.error(f"Failed to upload to GCS: {upload_result.get('error')}")
+                    
+            except Exception as gcs_error:
+                logger.error(f"GCS upload error: {gcs_error}")
+                doc_file.gcs_upload_status = 'failed'
+                doc_file.save()
+            
             # Update download queue status
             queue_item = DownloadQueue.objects.filter(document_file=doc_file).first()
             if queue_item:
@@ -145,8 +223,71 @@ class QuestionDownloadService:
             
             return False
     
+    def bulk_download_questions_from_master_data(self, master_data_list: List[QuestionMasterData], 
+                                               use_celery: bool = True) -> Dict:
+        """Download PDFs for questions from master data using Celery tasks"""
+        
+        if use_celery:
+            # Use Celery for bulk download
+            master_data_ids = [md.id for md in master_data_list]
+            
+            from .tasks import bulk_download_question_pdfs_from_master_data_task
+            
+            # Start Celery task
+            task = bulk_download_question_pdfs_from_master_data_task.delay(master_data_ids)
+            
+            return {
+                'total': len(master_data_list),
+                'task_id': task.id,
+                'status': 'started',
+                'message': 'Bulk download from master data started via Celery. Use task status endpoint to monitor progress.'
+            }
+        else:
+            # Synchronous implementation
+            results = {
+                'total': len(master_data_list),
+                'queued': 0,
+                'already_downloaded': 0,
+                'no_pdf': 0,
+                'errors': []
+            }
+            
+            for master_data in master_data_list:
+                try:
+                    # Get PDF URL from master data
+                    pdf_url = master_data.get_pdf_url()
+                    
+                    if not pdf_url:
+                        results['no_pdf'] += 1
+                        continue
+                    
+                    # Create or get corresponding Question object
+                    question = self._create_question_from_master_data(master_data)
+                    
+                    # Check if already downloaded
+                    existing_doc = DocumentFile.objects.filter(
+                        question=question,
+                        original_url=pdf_url,
+                        status='completed'
+                    ).first()
+                    
+                    if existing_doc:
+                        results['already_downloaded'] += 1
+                        continue
+                    
+                    # Queue for download
+                    doc_file = self.queue_question_pdf_download(question, pdf_url)
+                    results['queued'] += 1
+                    
+                except Exception as e:
+                    error_msg = f"Q.{master_data.question_number}: {str(e)}"
+                    results['errors'].append(error_msg)
+                    logger.error(error_msg)
+            
+            return results
+    
     def bulk_download_questions(self, questions: List[Question], use_celery: bool = True) -> Dict:
-        """Download PDFs for multiple questions using Celery tasks"""
+        """Download PDFs for multiple questions using Celery tasks (legacy method)"""
         
         if use_celery:
             # Use Celery for bulk download
@@ -284,6 +425,14 @@ class QuestionDownloadService:
             ).count()
         }
         
+        # Master data statistics
+        stats['master_data'] = {
+            'total_master_records': QuestionMasterData.objects.count(),
+            'processed': QuestionMasterData.objects.filter(is_processed=True).count(),
+            'unprocessed': QuestionMasterData.objects.filter(is_processed=False).count(),
+            'with_pdf_urls': QuestionMasterData.objects.exclude(questions_file_path='').count()
+        }
+        
         # Calculate total size
         completed_files = question_files.filter(status='completed')
         total_size = sum(f.file_size for f in completed_files if f.file_size)
@@ -297,4 +446,150 @@ class QuestionDownloadService:
             stats['average_size_mb'] = 0
         
         return stats
+    
+    def process_download_queue(self, max_items: int = 10, use_celery: bool = False) -> Dict:
+        """
+        Process pending items in the download queue
+        
+        Args:
+            max_items: Maximum number of items to process
+            
+        Returns:
+            Dict with processing results
+        """
+        from services.files.models import DownloadQueue
+        
+        # Get pending queue items for questions
+        pending_items = DownloadQueue.objects.filter(
+            document_file__document_category='parl_question',
+            status='queued'
+        ).order_by('priority', 'created_at')[:max_items]
+        
+        results = {
+            'processed': 0,
+            'successful': 0,
+            'failed': 0,
+            'errors': []
+        }
+        
+        logger.info(f"Processing {pending_items.count()} pending question downloads")
+        
+        for queue_item in pending_items:
+            try:
+                doc_file = queue_item.document_file
+                question = doc_file.question
+                
+                if not question:
+                    results['failed'] += 1
+                    results['errors'].append(f"No question associated with {doc_file.file_name}")
+                    queue_item.mark_failed("No associated question")
+                    continue
+                
+                # Get PDF URL from question
+                pdf_urls = question.pdf_files if isinstance(question.pdf_files, list) else []
+                if not pdf_urls:
+                    results['failed'] += 1
+                    results['errors'].append(f"No PDF URL for question {question.question_number}")
+                    queue_item.mark_failed("No PDF URL available")
+                    continue
+                
+                pdf_url = pdf_urls[0]
+                
+                # Mark as processing
+                queue_item.mark_started('question_download_service')
+                
+                # Download with GCS integration
+                success = self.download_question_pdf(question, pdf_url)
+                
+                if success:
+                    queue_item.mark_completed()
+                    results['successful'] += 1
+                    logger.info(f"Successfully processed question {question.question_number}")
+                else:
+                    queue_item.mark_failed("Download failed")
+                    results['failed'] += 1
+                    results['errors'].append(f"Download failed for question {question.question_number}")
+                
+                results['processed'] += 1
+                
+            except Exception as e:
+                results['failed'] += 1
+                results['processed'] += 1
+                error_msg = f"Error processing queue item {queue_item.id}: {str(e)}"
+                results['errors'].append(error_msg)
+                logger.error(error_msg)
+                
+                try:
+                    queue_item.mark_failed(str(e))
+                except:
+                    pass
+        
+        logger.info(f"Queue processing completed: {results['processed']} processed, {results['successful']} successful, {results['failed']} failed")
+        return results
+    
+    def _create_question_from_master_data(self, master_data: QuestionMasterData) -> Question:
+        """Create or get Question object from QuestionMasterData"""
+        try:
+            # Check if Question already exists
+            try:
+                if master_data.question:
+                    return master_data.question
+            except QuestionMasterData.question.RelatedObjectDoesNotExist:
+                # No related question exists yet
+                pass
+            
+            # Create Question from master data
+            question_data = {
+                'question_id': f"master_{master_data.id}",
+                'question_number': master_data.question_number,
+                'question_type': master_data.question_type.title(),  # Convert to title case
+                'title': master_data.subjects,
+                'subject': master_data.subjects,
+                'question_text': master_data.question_text,
+                'answer_text': master_data.answer_text,
+                'date': master_data.date,
+                'lok_sabha': master_data.lok_sabha,
+                'session': master_data.session,
+                'pdf_files': [master_data.get_pdf_url()] if master_data.get_pdf_url() else [],
+                'minister_names': [master_data.ministry] if master_data.ministry else [],
+                'raw_api_data': master_data.raw_api_data,
+                'last_scraped': master_data.last_fetched
+            }
+            
+            question, created = Question.objects.get_or_create(
+                question_number=master_data.question_number,
+                lok_sabha=master_data.lok_sabha,
+                session=master_data.session,
+                defaults=question_data
+            )
+            
+            # Link master data to question
+            master_data.question = question
+            master_data.is_processed = True
+            master_data.processed_at = timezone.now()
+            master_data.save()
+            
+            # Handle members and ministries
+            if master_data.members:
+                from .models import Member
+                for member_name in master_data.members:
+                    if member_name.strip():
+                        member, _ = Member.objects.get_or_create(name=member_name.strip())
+                        question.members.add(member)
+            
+            if master_data.ministry:
+                from .models import Ministry
+                ministry, _ = Ministry.objects.get_or_create(name=master_data.ministry)
+                question.ministries.add(ministry)
+            
+            if created:
+                logger.info(f"Created Question from master data: Q.{question.question_number}")
+            else:
+                logger.info(f"Found existing Question for master data: Q.{question.question_number}")
+            
+            return question
+            
+        except Exception as e:
+            logger.error(f"Failed to create Question from master data {master_data.id}: {e}")
+            raise
 

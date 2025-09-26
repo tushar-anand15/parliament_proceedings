@@ -11,21 +11,26 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 from pathlib import Path
+import os
+from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load environment variables from .env file
+load_dotenv(BASE_DIR.parent / '.env')
 
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = "django-insecure-@$nyjnxgv9l2qa)20+5e-i=4ti%il&qa=2x(h_pe1ntn*5tydx"
+SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-@$nyjnxgv9l2qa)20+5e-i=4ti%il&qa=2x(h_pe1ntn*5tydx')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv('DEBUG', 'true').lower() == 'true'
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
 
 
 # Application definition
@@ -48,6 +53,7 @@ INSTALLED_APPS = [
     "services.files",
     "services.ai_service",
     "services.user_auth",
+    "services.cloud_storage",
 ]
 
 MIDDLEWARE = [
@@ -86,23 +92,17 @@ WSGI_APPLICATION = "parliament_api.wsgi.application"
 
 DATABASES = {
     "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": os.getenv('DB_NAME', 'parliament_api'),
+        "USER": os.getenv('DB_USER', 'parliament_user'),
+        "PASSWORD": os.getenv('DB_PASSWORD', '***REMOVED_SECRET***'),
+        "HOST": os.getenv('DB_HOST', 'localhost'),
+        "PORT": os.getenv('DB_PORT', '5432'),
+        "CONN_MAX_AGE": int(os.getenv('DB_CONN_MAX_AGE', '600')),
+        "CONN_HEALTH_CHECKS": os.getenv('DB_CONN_HEALTH_CHECKS', 'true').lower() == 'true',
     }
 }
 
-# PostgreSQL configuration (uncomment when ready to use)
-
-# DATABASES = {
-#     "default": {
-#         "ENGINE": "django.db.backends.postgresql",
-#         "NAME": "parliament_db", 
-#         "USER": "parliament_user",
-#         "PASSWORD": "parliament_pass",
-#         "HOST": "localhost",
-#         "PORT": "5432",
-#     }
-# }
 
 
 # Password validation
@@ -153,7 +153,7 @@ REST_FRAMEWORK = {
         'rest_framework.authentication.SessionAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
-        'rest_framework.permissions.AllowAny',  # Disabled auth for dev
+        'rest_framework.permissions.IsAuthenticated',  # Enable authentication for all endpoints
     ],
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 50,
@@ -219,12 +219,16 @@ FILE_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024  # 10MB
 DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024  # 10MB
 
 # Celery Configuration
-CELERY_BROKER_URL = 'redis://localhost:6379/0'
-CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
-CELERY_ACCEPT_CONTENT = ['json']
-CELERY_TASK_SERIALIZER = 'json'
-CELERY_RESULT_SERIALIZER = 'json'
-CELERY_TIMEZONE = 'UTC'
+CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0')
+CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', 'redis://localhost:6379/0')
+CELERY_ACCEPT_CONTENT = [os.getenv('CELERY_ACCEPT_CONTENT', 'json')]
+CELERY_TASK_SERIALIZER = os.getenv('CELERY_TASK_SERIALIZER', 'json')
+CELERY_RESULT_SERIALIZER = os.getenv('CELERY_RESULT_SERIALIZER', 'json')
+CELERY_TIMEZONE = os.getenv('CELERY_TIMEZONE', 'UTC')
+
+# Celery Worker Configuration
+CELERY_WORKER_CONCURRENCY = int(os.getenv('CELERY_WORKER_CONCURRENCY', '8'))
+CELERY_WORKER_MAX_TASKS_PER_CHILD = int(os.getenv('CELERY_WORKER_MAX_TASKS_PER_CHILD', '1000'))
 
 # Logging
 LOGGING = {
@@ -335,3 +339,17 @@ PDF_MAX_PARALLEL_DOWNLOADS = 10
 AI_SERVICE_ENABLED = False
 AI_API_KEY = ""  # To be set via environment variables
 AI_MODEL_NAME = "gpt-3.5-turbo"  # Default model
+
+# Google Cloud Storage Settings
+GCS_PROJECT_ID = os.getenv('GCS_PROJECT_ID', 'parliament-process')
+GCS_CREDENTIALS_PATH = os.getenv('GCS_CREDENTIALS_PATH', BASE_DIR / 'parliament-process-90c920ce4243.json')
+GCS_DEBATES_BUCKET = os.getenv('GCS_DEBATES_BUCKET', 'parliament-ls-debates')
+GCS_QUESTIONS_BUCKET = os.getenv('GCS_QUESTIONS_BUCKET', 'parliament-ls-questions')
+GCS_PRESIGNED_URL_EXPIRATION = int(os.getenv('GCS_PRESIGNED_URL_EXPIRATION', '3600'))  # 1 hour
+GCS_AUTO_DELETE_LOCAL = os.getenv('GCS_AUTO_DELETE_LOCAL', 'true').lower() == 'true'
+GCS_REGION = os.getenv('GCS_REGION', 'asia-south1')  # Mumbai region
+
+# Admin User Settings (for initial setup)
+ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'parliament_admin')
+ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'ParliamentAPI@2025#Secure')
+ADMIN_EMAIL = os.getenv('ADMIN_EMAIL', 'admin@parliament-api.gov.in')

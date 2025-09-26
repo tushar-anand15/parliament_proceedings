@@ -6,14 +6,19 @@ import logging
 import os
 import requests
 
-from .models import Question, LokSabha, Session
+from .models import Question, QuestionMasterData, LokSabha, Session
 from services.files.models import DocumentFile, DownloadQueue
 from .question_download_service import QuestionDownloadService
 
 logger = logging.getLogger(__name__)
 
 
-@shared_task(bind=True, name='questions.download_question_pdf')
+@shared_task(bind=True, name='questions.download_question_pdf',
+              autoretry_for=(Exception,),
+              retry_kwargs={'max_retries': 3, 'countdown': 60},
+              retry_backoff=True,
+              retry_backoff_max=300,
+              retry_jitter=True)
 def download_question_pdf_task(self, question_id: int, pdf_url: str = None):
     """
     Celery task for downloading a single question PDF
@@ -92,7 +97,12 @@ def download_question_pdf_task(self, question_id: int, pdf_url: str = None):
         }
 
 
-@shared_task(bind=True, name='questions.bulk_download_question_pdfs')
+@shared_task(bind=True, name='questions.bulk_download_question_pdfs',
+              autoretry_for=(Exception,),
+              retry_kwargs={'max_retries': 2, 'countdown': 120},
+              retry_backoff=True,
+              retry_backoff_max=600,
+              retry_jitter=True)
 def bulk_download_question_pdfs_task(self, question_ids: list, max_concurrent: int = 5):
     """
     Celery task for downloading multiple question PDFs with concurrency control
@@ -343,6 +353,129 @@ def get_download_statistics_task(self):
     
     except Exception as e:
         logger.error(f"Download statistics task failed: {str(e)}")
+        return {
+            'status': 'FAILED',
+            'error': str(e)
+        }
+
+
+@shared_task(bind=True, name='questions.bulk_download_question_pdfs_from_master_data',
+              autoretry_for=(Exception,),
+              retry_kwargs={'max_retries': 3, 'countdown': 60},
+              retry_backoff=True,
+              retry_backoff_max=300,
+              retry_jitter=True)
+def bulk_download_question_pdfs_from_master_data_task(self, master_data_ids: list):
+    """
+    Celery task for bulk downloading question PDFs from master data
+    
+    Args:
+        master_data_ids: List of QuestionMasterData IDs to process
+    """
+    try:
+        # Update task status
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': 'Starting bulk download from master data...', 'progress': 0}
+        )
+        
+        # Get master data objects
+        master_data_list = QuestionMasterData.objects.filter(id__in=master_data_ids)
+        total_count = master_data_list.count()
+        
+        if total_count == 0:
+            return {
+                'status': 'FAILED',
+                'error': 'No master data found with provided IDs'
+            }
+        
+        # Update progress
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': f'Processing {total_count} questions from master data', 'progress': 10}
+        )
+        
+        # Initialize download service
+        service = QuestionDownloadService()
+        
+        # Process downloads
+        results = {
+            'total': total_count,
+            'queued': 0,
+            'already_downloaded': 0,
+            'no_pdf': 0,
+            'errors': []
+        }
+        
+        for i, master_data in enumerate(master_data_list, 1):
+            try:
+                # Update progress
+                progress = 10 + (i / total_count) * 80
+                self.update_state(
+                    state='PROGRESS',
+                    meta={
+                        'status': f'Processing question {i}/{total_count}: Q.{master_data.question_number}',
+                        'progress': progress
+                    }
+                )
+                
+                # Get PDF URL from master data
+                pdf_url = master_data.get_pdf_url()
+                
+                if not pdf_url:
+                    results['no_pdf'] += 1
+                    continue
+                
+                # Create or get corresponding Question object
+                question = service._create_question_from_master_data(master_data)
+                
+                # Check if already downloaded
+                existing_doc = DocumentFile.objects.filter(
+                    question=question,
+                    original_url=pdf_url,
+                    status='completed'
+                ).first()
+                
+                if existing_doc:
+                    results['already_downloaded'] += 1
+                    continue
+                
+                # Download immediately to GCS
+                success = service.download_question_pdf(question, pdf_url)
+                if success:
+                    results['queued'] += 1
+                else:
+                    results['errors'].append(f"Q.{master_data.question_number}: Download failed")
+                
+            except Exception as e:
+                error_msg = f"Q.{master_data.question_number}: {str(e)}"
+                results['errors'].append(error_msg)
+                logger.error(error_msg)
+        
+        # Final status update
+        self.update_state(
+            state='PROGRESS',
+            meta={
+                'status': 'Bulk download from master data completed',
+                'progress': 100,
+                'results': results
+            }
+        )
+        
+        return {
+            'status': 'SUCCESS',
+            'message': f'Bulk download from master data completed: {results["queued"]} queued, {results["already_downloaded"]} already downloaded',
+            'results': results
+        }
+        
+    except Exception as e:
+        logger.error(f"Bulk download from master data task failed: {str(e)}")
+        
+        self.update_state(
+            state='FAILURE',
+            meta={'status': 'Task failed', 'error': str(e)}
+        )
+        
         return {
             'status': 'FAILED',
             'error': str(e)

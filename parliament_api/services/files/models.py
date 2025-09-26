@@ -57,6 +57,19 @@ class DocumentFile(models.Model):
     last_download_attempt = models.DateTimeField(null=True, blank=True)
     download_error = models.TextField(blank=True)
     
+    # Google Cloud Storage fields
+    gcs_bucket_name = models.CharField(max_length=100, blank=True)
+    gcs_object_key = models.CharField(max_length=500, blank=True)
+    gcs_uploaded_at = models.DateTimeField(null=True, blank=True)
+    gcs_upload_status = models.CharField(max_length=20, default='pending', choices=[
+        ('pending', 'Upload Pending'),
+        ('uploading', 'Currently Uploading'),
+        ('completed', 'Upload Completed'),
+        ('failed', 'Upload Failed'),
+    ])
+    gcs_etag = models.CharField(max_length=100, blank=True)  # For integrity checking
+    gcs_url = models.URLField(max_length=500, blank=True)  # gs:// URL
+    
     # Metadata
     requested_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
     download_priority = models.IntegerField(default=5)  # 1=highest, 10=lowest
@@ -83,7 +96,11 @@ class DocumentFile(models.Model):
 
     @property
     def is_downloaded(self):
-        return self.status == 'completed' and self.file_path
+        return self.status == 'completed' and (self.file_path or self.gcs_object_key)
+    
+    @property
+    def is_in_gcs(self):
+        return self.gcs_upload_status == 'completed' and self.gcs_object_key
 
     @property
     def file_size_mb(self):
@@ -102,6 +119,22 @@ class DocumentFile(models.Model):
         if self.is_downloaded:
             return f"/api/files/{self.id}/download/"
         return None
+    
+    def get_gcs_presigned_url(self, expiration_minutes=60):
+        """Get presigned URL for GCS file access"""
+        if not self.is_in_gcs:
+            return None
+        
+        try:
+            from services.cloud_storage.gcs_service import GCSService
+            gcs_service = GCSService()
+            return gcs_service.generate_presigned_url(
+                self.gcs_bucket_name,
+                self.gcs_object_key,
+                expiration_minutes
+            )
+        except Exception:
+            return None
 
     def delete_file(self):
         """Delete the physical file from disk"""

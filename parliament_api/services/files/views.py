@@ -165,39 +165,78 @@ class FileUploadView(APIView):
 
 
 class FileDownloadView(APIView):
-    """File download endpoint"""
-    permission_classes = []
+    """File download endpoint with GCS presigned URLs"""
+    permission_classes = [IsAuthenticated]
     
     @extend_schema(
-        description="Download a file",
-        tags=['Files']
+        description="Get secure download URL for a file",
+        tags=['Files'],
+        responses={
+            200: {
+                'description': 'Download URL generated successfully',
+                'content': {
+                    'application/json': {
+                        'example': {
+                            'download_url': 'https://storage.googleapis.com/...',
+                            'expires_at': '2025-01-01T12:00:00Z',
+                            'file_name': 'document.pdf'
+                        }
+                    }
+                }
+            }
+        }
     )
     def get(self, request, file_id):
-        """Download file"""
+        """Get secure download URL for file"""
         try:
             doc_file = DocumentFile.objects.get(id=file_id)
         except DocumentFile.DoesNotExist:
-            raise Http404("File not found")
+            return Response({'error': 'File not found'}, status=404)
+        
+        # Check if file is available
+        if not doc_file.is_downloaded:
+            return Response({
+                'error': 'File not available for download',
+                'status': doc_file.status
+            }, status=400)
         
         # Log file access
         FileAccessLog.objects.create(
-            file=doc_file,
-            user=request.user,
+            document_file=doc_file,
+            user=request.user if request.user.is_authenticated else None,
             access_type='download',
-            ip_address=request.META.get('REMOTE_ADDR')
+            ip_address=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
         )
         
-        # Increment download count
-        doc_file.download_count += 1
-        doc_file.save()
+        # Try to get GCS presigned URL first
+        if doc_file.is_in_gcs:
+            presigned_url = doc_file.get_gcs_presigned_url(expiration_minutes=60)
+            if presigned_url:
+                from datetime import datetime, timedelta
+                expires_at = datetime.utcnow() + timedelta(minutes=60)
+                
+                return Response({
+                    'download_url': presigned_url,
+                    'expires_at': expires_at.isoformat() + 'Z',
+                    'file_name': doc_file.file_name,
+                    'file_size': doc_file.file_size,
+                    'storage_type': 'gcs'
+                })
         
-        # In production, serve file from proper storage
+        # Fallback to local file serving
+        if doc_file.file_path:
+            return Response({
+                'download_url': f'/api/files/serve/{doc_file.id}/',
+                'file_name': doc_file.file_name,
+                'file_size': doc_file.file_size,
+                'storage_type': 'local'
+            })
+        
         return Response({
-            'message': 'File download initiated',
-            'file_id': doc_file.id,
-            'filename': doc_file.original_filename,
-            'download_url': f'/api/files/serve/{doc_file.id}/'
-        })
+            'error': 'File not accessible',
+            'message': 'File is not available in any storage location'
+        }, status=500)
 
 
 class FilePreviewView(APIView):

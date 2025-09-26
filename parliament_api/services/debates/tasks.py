@@ -11,7 +11,12 @@ from .debate_scraper_service import DebateScraperService
 logger = logging.getLogger(__name__)
 
 
-@shared_task(bind=True, name='debates.scrape_debates')
+@shared_task(bind=True, name='debates.scrape_debates', 
+              autoretry_for=(Exception,), 
+              retry_kwargs={'max_retries': 3, 'countdown': 60},
+              retry_backoff=True,
+              retry_backoff_max=300,
+              retry_jitter=True)
 def scrape_debates_task(self, 
                        loksabha_no: str,
                        session_no: str,
@@ -153,16 +158,27 @@ def scrape_debates_task(self,
                 )
                 
                 # Fetch debate info for this date
+                # Convert date object to string format expected by API (DD/MM/YYYY)
+                date_str = date.strftime('%d/%m/%Y')
                 debate_info = scraper._fetch_debate_info_with_fallback(
-                    loksabha_no, session_no, date
+                    loksabha_no, session_no, date_str
                 )
                 
                 if not debate_info:
                     logger.warning(f"No debate info found for {date}")
                     continue
                 
+                # Handle both single dict and list responses
+                if isinstance(debate_info, dict):
+                    debate_list = [debate_info]
+                elif isinstance(debate_info, list):
+                    debate_list = debate_info
+                else:
+                    logger.warning(f"Unexpected debate_info format: {type(debate_info)}")
+                    continue
+                
                 # Process each debate
-                for debate_data in debate_info:
+                for debate_data in debate_list:
                     try:
                         with transaction.atomic():
                             # Generate debate ID
@@ -192,25 +208,18 @@ def scrape_debates_task(self,
                                 debates_updated += 1
                                 logger.info(f"Updated debate: {debate.debate_id}")
                             
-                            # Download PDF if requested and URL available
-                            if download_pdfs and debate.pdf_url:
+                            # Queue PDF download if requested and URL available (includes GCS upload)
+                            if download_pdfs and debate.pdf_url and not debate.is_downloaded:
                                 try:
-                                    logger.info(f"Starting PDF download for {debate.debate_id}")
-                                    pdf_path = scraper.download_debate_pdf(debate)
-                                    if pdf_path:
-                                        debate.status = 'completed'
-                                        debate.save()
-                                        logger.info(f"Downloaded PDF: {pdf_path}")
-                                    else:
-                                        debate.status = 'failed'
-                                        debate.save()
-                                        logger.warning(f"Failed to download PDF for {debate.debate_id}")
+                                    logger.info(f"Queuing PDF download for {debate.debate_id}")
+                                    scraper._queue_pdf_download(debate)
+                                    logger.info(f"PDF download queued for {debate.debate_id}")
                                 except Exception as e:
-                                    logger.error(f"PDF download error for {debate.debate_id}: {str(e)}")
+                                    logger.error(f"PDF queue error for {debate.debate_id}: {str(e)}")
                                     debate.status = 'failed'
                                     debate.error_message = str(e)
                                     debate.save()
-                                    errors.append(f"PDF download failed for {debate.debate_id}: {str(e)}")
+                                    errors.append(f"PDF queue failed for {debate.debate_id}: {str(e)}")
                     
                     except Exception as e:
                         error_msg = f"Error processing debate data: {str(e)}"
@@ -248,16 +257,13 @@ def scrape_debates_task(self,
             
             for debate in pending_debates:
                 try:
-                    logger.info(f"Downloading PDF for {debate.debate_id}")
-                    success = scraper.download_debate_pdf(debate)
-                    if success:
-                        pdfs_downloaded += 1
-                        logger.info(f"Successfully downloaded PDF for {debate.debate_id}")
-                    else:
-                        logger.warning(f"Failed to download PDF for {debate.debate_id}")
+                    logger.info(f"Queuing PDF download for {debate.debate_id}")
+                    scraper._queue_pdf_download(debate)
+                    pdfs_downloaded += 1
+                    logger.info(f"Successfully queued PDF for {debate.debate_id}")
                 except Exception as e:
-                    logger.error(f"Error downloading PDF for {debate.debate_id}: {e}")
-                    errors.append(f"PDF download failed for {debate.debate_id}: {str(e)}")
+                    logger.error(f"Error queuing PDF for {debate.debate_id}: {e}")
+                    errors.append(f"PDF queue failed for {debate.debate_id}: {str(e)}")
         
         # Final progress update
         self.update_state(
@@ -312,7 +318,12 @@ def scrape_debates_task(self,
         return {'status': 'FAILED', 'error': error_msg}
 
 
-@shared_task(bind=True, name='debates.download_pdf')
+@shared_task(bind=True, name='debates.download_pdf',
+              autoretry_for=(Exception,),
+              retry_kwargs={'max_retries': 3, 'countdown': 60},
+              retry_backoff=True,
+              retry_backoff_max=300,
+              retry_jitter=True)
 def download_pdf_task(self, debate_id: int):
     """
     Celery task for downloading a single debate PDF

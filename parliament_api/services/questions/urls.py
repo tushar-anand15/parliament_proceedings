@@ -17,9 +17,19 @@ urlpatterns = [
     # Additional custom endpoints
     path('stats/', views.question_stats, name='question-stats'),
     
+    # Master Data endpoints
+    path('master-data/', views.QuestionMasterDataView.as_view(), name='question-master-data'),
+    path('master-data/list/', views.QuestionMasterDataListView.as_view(), name='question-master-data-list'),
+    path('master-data/bulk-download/', views.QuestionMasterDataBulkDownloadView.as_view(), name='question-master-data-bulk-download'),
+    
+    # Session-based Testing endpoints
+    path('sessions/', views.QuestionSessionTestView.as_view(), name='question-sessions'),
+    path('sessions/summary/', views.QuestionSessionSummaryView.as_view(), name='question-session-summary'),
+    
     # Celery task endpoints
     path('task-status/<str:task_id>/', views.QuestionCeleryTaskStatusView.as_view(), name='question-celery-task-status'),
     path('bulk-download/', views.QuestionBulkDownloadView.as_view(), name='question-bulk-download'),
     path('process-queue/', views.QuestionDownloadQueueView.as_view(), name='question-process-queue'),
     path('download-statistics/', views.QuestionDownloadStatisticsView.as_view(), name='question-download-statistics'),
+    path('populate/', views.QuestionPopulateView.as_view(), name='question-populate'),
 ] 

@@ -343,6 +343,38 @@ class DebateScrapingStatusView(APIView):
         })
 
 
+class SessionDiscoveryView(APIView):
+    """Discover all available sessions from both modern and historical APIs"""
+    permission_classes = []
+    
+    @extend_schema(
+        description="Discover all available Lok Sabha sessions from both modern and historical APIs",
+        tags=['Debates']
+    )
+    def get(self, request):
+        """Discover all available sessions"""
+        try:
+            service = DebateScraperService()
+            sessions = service.discover_all_available_sessions()
+            
+            return Response({
+                'total_sessions': len(sessions),
+                'sessions': sessions,
+                'api_sources': list(set([s.get('api_source', 'unknown') for s in sessions])),
+                'lok_sabha_range': {
+                    'min': min([int(s['loksabha_no']) for s in sessions]) if sessions else 0,
+                    'max': max([int(s['loksabha_no']) for s in sessions]) if sessions else 0
+                },
+                'total_dates': sum([s.get('date_count', 0) for s in sessions]),
+                'discovered_at': timezone.now()
+            })
+            
+        except Exception as e:
+            return Response({
+                'error': f'Failed to discover sessions: {str(e)}'
+            }, status=500)
+
+
 class DebateStatisticsView(APIView):
     """Get comprehensive debate statistics"""
     permission_classes = []
