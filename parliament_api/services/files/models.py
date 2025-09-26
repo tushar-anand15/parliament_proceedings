@@ -6,7 +6,7 @@ import os
 
 
 class DocumentFile(models.Model):
-    """Model to track PDF files for parliamentary questions"""
+    """Model to track PDF files for parliamentary documents"""
     
     STATUS_CHOICES = [
         ('pending', 'Download Pending'),
@@ -16,16 +16,32 @@ class DocumentFile(models.Model):
         ('not_available', 'Not Available'),
     ]
     
+    DOCUMENT_CATEGORIES = [
+        ('parl_question', 'Parliamentary Question'),
+        ('parl_debate', 'Parliamentary Debate'),
+        ('parl_answer', 'Parliamentary Answer'),
+        ('parl_appendix', 'Parliamentary Appendix'),
+        ('parl_committee', 'Committee Report'),
+        ('parl_bill', 'Bill Document'),
+        ('other', 'Other Document'),
+    ]
+    
     FILE_TYPES = [
         ('question', 'Question Document'),
         ('answer', 'Answer Document'),
         ('combined', 'Combined Q&A Document'),
+        ('debate', 'Debate Transcript'),
         ('appendix', 'Appendix'),
+        ('committee_report', 'Committee Report'),
+        ('bill', 'Bill Document'),
         ('other', 'Other'),
     ]
 
-    # Relationships
-    question = models.ForeignKey(Question, on_delete=models.CASCADE, related_name='files')
+    # Document Category (primary categorization)
+    document_category = models.CharField(max_length=20, choices=DOCUMENT_CATEGORIES, default='other')
+    
+    # Relationships (optional - depends on document type)
+    question = models.ForeignKey(Question, on_delete=models.CASCADE, related_name='files', null=True, blank=True)
     
     # File Information
     file_type = models.CharField(max_length=20, choices=FILE_TYPES, default='question')
@@ -54,12 +70,16 @@ class DocumentFile(models.Model):
         ordering = ['-created_at']
         indexes = [
             models.Index(fields=['status']),
+            models.Index(fields=['document_category', 'file_type']),
             models.Index(fields=['question', 'file_type']),
             models.Index(fields=['download_priority', 'created_at']),
         ]
 
     def __str__(self):
-        return f"{self.question.question_number} - {self.file_type} ({self.status})"
+        if self.question:
+            return f"Q.{self.question.question_number} - {self.file_type} ({self.status})"
+        else:
+            return f"{self.document_category} - {self.file_type} ({self.status})"
 
     @property
     def is_downloaded(self):

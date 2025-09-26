@@ -22,6 +22,7 @@ class ScrapingJob(models.Model):
         ('incremental', 'Incremental Update'),
         ('specific_session', 'Specific Session'),
         ('retry_failed', 'Retry Failed'),
+        ('debates', 'Debate Scraping'),
     ]
 
     # Job Information

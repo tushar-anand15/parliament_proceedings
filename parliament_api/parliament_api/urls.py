@@ -37,6 +37,7 @@ def api_root(request):
         'endpoints': {
             'authentication': '/api/auth/',
             'questions': '/api/questions/',
+            'debates': '/api/debates/',
             'scraper': '/api/scraper/',
             'files': '/api/files/',
             'ai_service': '/api/ai/',
@@ -66,4 +67,5 @@ urlpatterns = [
     path('api/scraper/', include('services.scraper.urls')),
     path('api/files/', include('services.files.urls')),
     path('api/ai/', include('services.ai_service.urls')),
+    path('api/debates/', include('services.debates.urls')),
 ]

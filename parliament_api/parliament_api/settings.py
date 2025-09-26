@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     # Custom apps
     "services.scraper",
     "services.questions",
+    "services.debates",
     "services.files",
     "services.ai_service",
     "services.user_auth",
@@ -91,6 +92,7 @@ DATABASES = {
 }
 
 # PostgreSQL configuration (uncomment when ready to use)
+
 # DATABASES = {
 #     "default": {
 #         "ENGINE": "django.db.backends.postgresql",
@@ -180,6 +182,7 @@ SPECTACULAR_SETTINGS = {
     ],
     'TAGS': [
         {'name': 'Questions', 'description': 'Parliamentary questions and answers'},
+        {'name': 'Debates', 'description': 'Parliamentary debates and proceedings'},
         {'name': 'Scraper', 'description': 'Data scraping and synchronization'},
         {'name': 'Files', 'description': 'PDF downloads and file management'},
         {'name': 'AI Service', 'description': 'AI analysis and summarization'},
@@ -232,32 +235,86 @@ LOGGING = {
             'level': 'INFO',
             'class': 'logging.FileHandler',
             'filename': BASE_DIR / 'logs' / 'parliament.log',
+            'formatter': 'verbose',
         },
         'console': {
             'level': 'DEBUG',
             'class': 'logging.StreamHandler',
+            'formatter': 'simple',
+        },
+    },
+    'formatters': {
+        'verbose': {
+            'format': '{levelname} {asctime} {module} {message}',
+            'style': '{',
+        },
+        'simple': {
+            'format': '{levelname} {message}',
+            'style': '{',
         },
     },
     'loggers': {
+        'services.scraper': {
+            'handlers': ['file', 'console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'services.questions': {
+            'handlers': ['file', 'console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'services.debates': {
+            'handlers': ['file', 'console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'services.files': {
+            'handlers': ['file', 'console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'services.ai_service': {
+            'handlers': ['file', 'console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        # Also add the short names for backward compatibility
         'scraper': {
             'handlers': ['file', 'console'],
             'level': 'INFO',
-            'propagate': True,
+            'propagate': False,
         },
         'questions': {
             'handlers': ['file', 'console'],
             'level': 'INFO',
-            'propagate': True,
+            'propagate': False,
+        },
+        'debates': {
+            'handlers': ['file', 'console'],
+            'level': 'INFO',
+            'propagate': False,
         },
         'files': {
             'handlers': ['file', 'console'],
             'level': 'INFO',
-            'propagate': True,
+            'propagate': False,
         },
         'ai_service': {
             'handlers': ['file', 'console'],
             'level': 'INFO',
-            'propagate': True,
+            'propagate': False,
+        },
+        # Root logger for Django
+        'django': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        # Catch-all root logger
+        '': {
+            'handlers': ['file', 'console'],
+            'level': 'INFO',
         },
     },
 }
