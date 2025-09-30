@@ -22,7 +22,8 @@ from services.questions.models import LokSabha, Session
 from services.files.models import DocumentFile, DownloadQueue
 from services.scraper.models import ScrapingJob, ScrapingError, ScrapingConfig, DataSource
 from services.cloud_storage.gcs_service import GCSService
-from .models import Debate, DebateSpeech, DebateTag, SessionDateCache
+from .models import Debate, DebateSpeech, DebateTag, SessionDateCache, DebateMasterData
+from .debate_master_data_service import DebateMasterDataService
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,7 @@ class DebateScraperService:
         self.session = requests.Session()
         self.config = ScrapingConfig.get_default()
         self.gcs_service = GCSService()
+        self.master_data_service = DebateMasterDataService()
         
         # Set headers for API requests
         self.session.headers.update({
@@ -137,20 +139,34 @@ class DebateScraperService:
         job.start_job()
         
         try:
-            # Get session dates from the API
-            session_dates = self._get_session_dates(lok_sabha.number, session.session_number)
+            # Get session dates from master data service
+            session_dates = self.master_data_service.get_debate_dates_for_session(
+                lok_sabha.number, 
+                session.session_number,
+                start_date=start_date,
+                end_date=end_date
+            )
             
             if not session_dates:
-                raise Exception(f"No session dates found for {lok_sabha.number}th LS Session {session.session_number}")
+                # Try to fetch fresh data if none exists
+                logger.info(f"No cached debate dates found, attempting to fetch from API...")
+                try:
+                    fetch_result = self.master_data_service.fetch_debate_dates_for_session(
+                        lok_sabha.number, 
+                        session.session_number
+                    )
+                    if fetch_result.get('dates_count', 0) > 0:
+                        session_dates = self.master_data_service.get_debate_dates_for_session(
+                            lok_sabha.number, 
+                            session.session_number,
+                            start_date=start_date,
+                            end_date=end_date
+                        )
+                except Exception as fetch_error:
+                    logger.warning(f"Failed to fetch fresh debate dates: {fetch_error}")
             
-            # Filter dates if start/end provided
-            if start_date:
-                start_dt = datetime.strptime(start_date, '%Y-%m-%d').date()
-                session_dates = [d for d in session_dates if datetime.strptime(d, '%d/%m/%Y').date() >= start_dt]
-            
-            if end_date:
-                end_dt = datetime.strptime(end_date, '%Y-%m-%d').date()
-                session_dates = [d for d in session_dates if datetime.strptime(d, '%d/%m/%Y').date() <= end_dt]
+            if not session_dates:
+                raise Exception(f"No debate dates found for {lok_sabha.number}th LS Session {session.session_number}")
             
             logger.info(f"Found {len(session_dates)} dates to process for debates")
             job.total_questions_expected = len(session_dates)  # Using same field for debates count
@@ -264,7 +280,39 @@ class DebateScraperService:
         return []
     
     def discover_all_available_sessions(self) -> List[Dict]:
-        """Discover all available sessions from both modern and historical APIs"""
+        """Discover all available sessions using the master data service"""
+        try:
+            # Use the master data service to get comprehensive session information
+            available_sessions = self.master_data_service.list_available_sessions_with_debates()
+            
+            # Convert to the expected format for backward compatibility
+            formatted_sessions = []
+            for session_info in available_sessions:
+                formatted_sessions.append({
+                    'loksabha_no': session_info['lok_sabha_number'],
+                    'session_no': session_info['session_number'],
+                    'available_dates': session_info['total_debate_dates'],  # This is a count, not actual dates
+                    'date_count': session_info['total_debate_dates'],
+                    'api_source': session_info['api_source'],
+                    'is_complete': session_info['is_complete'],
+                    'last_updated': session_info['last_updated'],
+                    'debates_discovered': session_info['debates_discovered'],
+                    'debates_downloaded': session_info['debates_downloaded'],
+                    'completion_percentage': session_info['completion_percentage'],
+                    'date_range': session_info['date_range']
+                })
+            
+            logger.info(f"Found {len(formatted_sessions)} sessions with debate data from master data service")
+            return formatted_sessions
+            
+        except Exception as e:
+            logger.error(f"Failed to discover sessions from master data service: {e}")
+            # Fallback to direct API discovery if master data service fails
+            logger.info("Falling back to direct API discovery...")
+            return self._discover_sessions_direct_api()
+    
+    def _discover_sessions_direct_api(self) -> List[Dict]:
+        """Discover all available sessions from both modern and historical APIs (fallback method)"""
         all_sessions = []
         
         # Method 1: Get modern sessions (LS13+) from main Parliament API

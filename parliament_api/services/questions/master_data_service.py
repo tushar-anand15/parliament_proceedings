@@ -216,6 +216,10 @@ class QuestionMasterDataService:
                         except ValueError:
                             logger.warning(f"Failed to parse date '{date_str}' for question {question_number}")
                     
+                    # Clean and normalize question type
+                    raw_question_type = q_data.get('type') or 'STARRED'
+                    clean_question_type = self._clean_question_type(raw_question_type)
+                    
                     # Prepare master data with safe null handling
                     master_data = {
                         'question_number': question_number,
@@ -223,7 +227,7 @@ class QuestionMasterDataService:
                         'lok_sabha_number': lok_sabha_number,
                         'members': q_data.get('member') or [],
                         'ministry': q_data.get('ministry') or '',
-                        'question_type': q_data.get('type') or 'STARRED',
+                        'question_type': clean_question_type,
                         'date': question_date,
                         'session_number': session_number,
                         'questions_file_path': q_data.get('questionsFilePath') or '',
@@ -408,14 +412,9 @@ class QuestionMasterDataService:
                         pdf_url_hindi = self._transform_legacy_pdf_url(file_url)
                         break
                 
-                # Convert legacy question type
-                question_type = q_data.get('questionType', 'Starred')
-                if question_type.lower() == 'starred':
-                    question_type = 'STARRED'
-                elif question_type.lower() == 'unstarred':
-                    question_type = 'UNSTARRED'
-                else:
-                    question_type = 'STARRED'  # Default
+                # Convert and clean legacy question type
+                raw_question_type = q_data.get('questionType', 'Starred')
+                question_type = self._clean_question_type(raw_question_type)
                 
                 # Prepare master data for legacy API
                 master_data = {
@@ -894,3 +893,31 @@ class QuestionMasterDataService:
         except Exception as e:
             logger.error(f"Failed to list available sessions: {e}")
             raise
+    
+    def _clean_question_type(self, raw_type: str) -> str:
+        """
+        Clean and normalize question type from API response
+        
+        Args:
+            raw_type: Raw question type from API (may have spaces/inconsistent case)
+            
+        Returns:
+            Cleaned question type that matches our model choices
+        """
+        if not raw_type:
+            return 'STARRED'  # Default
+        
+        # Remove extra whitespace and normalize
+        cleaned_type = raw_type.strip().upper()
+        
+        # Map various formats to our standard types
+        if cleaned_type in ['STARRED', 'STARRED QUESTION']:
+            return 'STARRED'
+        elif cleaned_type in ['UNSTARRED', 'UNSTARRED QUESTION']:
+            return 'UNSTARRED'
+        elif cleaned_type in ['SHORT_NOTICE', 'SHORT NOTICE', 'SHORT NOTICE QUESTION']:
+            return 'SHORT_NOTICE'
+        else:
+            # Log unexpected types and default to STARRED
+            logger.warning(f"Unexpected question type '{raw_type}' -> defaulting to STARRED")
+            return 'STARRED'

@@ -3,6 +3,28 @@ from django.contrib.auth.models import User
 import json
 
 
+class ParliamentInstitution(models.Model):
+    """Model to store Parliament institution information (Lok Sabha, Rajya Sabha)"""
+    
+    INSTITUTION_TYPES = [
+        ('lok_sabha', 'Lok Sabha'),
+        ('rajya_sabha', 'Rajya Sabha'),
+    ]
+    
+    name = models.CharField(max_length=50, choices=INSTITUTION_TYPES, unique=True)
+    full_name = models.CharField(max_length=100)
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['name']
+    
+    def __str__(self):
+        return self.full_name
+
+
 class LokSabha(models.Model):
     """Model to store Lok Sabha information"""
     number = models.CharField(max_length=10, unique=True)  # "15", "16", "17"
@@ -84,15 +106,19 @@ class QuestionMasterData(models.Model):
         ('SHORT_NOTICE', 'Short Notice Question'),
     ]
     
+    # Institution and Session Information
+    parent_institution = models.ForeignKey(ParliamentInstitution, on_delete=models.CASCADE, related_name='question_master_data', null=True, blank=True)  # Will be populated after creation
+    lok_sabha_number = models.CharField(max_length=10)  # lokNo - for Lok Sabha questions
+    rajya_sabha_number = models.CharField(max_length=10, blank=True)  # For Rajya Sabha questions (future)
+    session_number = models.CharField(max_length=10)  # sessionNo
+    
     # Basic Information from API
     question_number = models.CharField(max_length=50)  # quesNo
     subjects = models.TextField()  # subjects
-    lok_sabha_number = models.CharField(max_length=10)  # lokNo
     members = models.JSONField(default=list)  # member array
     ministry = models.CharField(max_length=200)  # ministry
     question_type = models.CharField(max_length=20, choices=QUESTION_TYPES)  # type
     date = models.DateField(null=True, blank=True)  # date
-    session_number = models.CharField(max_length=10)  # sessionNo
     
     # PDF URLs
     questions_file_path = models.URLField(blank=True)  # questionsFilePath
@@ -124,10 +150,10 @@ class QuestionMasterData(models.Model):
     last_fetched = models.DateTimeField(auto_now=True)
 
     class Meta:
-        unique_together = ['question_number', 'lok_sabha_number', 'session_number']
+        unique_together = ['parent_institution', 'question_number', 'lok_sabha_number', 'session_number']
         ordering = ['-date', '-question_number']
         indexes = [
-            models.Index(fields=['lok_sabha_number', 'session_number']),
+            models.Index(fields=['parent_institution', 'lok_sabha_number', 'session_number']),
             models.Index(fields=['question_type']),
             models.Index(fields=['is_processed']),
             models.Index(fields=['date']),
@@ -157,7 +183,8 @@ class Question(models.Model):
         ('withdrawn', 'Withdrawn'),
     ]
 
-    # Basic Information
+    # Institution and Basic Information
+    parent_institution = models.ForeignKey(ParliamentInstitution, on_delete=models.CASCADE, related_name='questions', null=True, blank=True)  # Will be populated after creation
     question_id = models.CharField(max_length=50, unique=True)  # Internal UUID
     api_resource_id = models.CharField(max_length=50, blank=True)  # API resourceId
     question_number = models.CharField(max_length=50)

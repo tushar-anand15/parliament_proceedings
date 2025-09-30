@@ -33,8 +33,19 @@ class QuestionDownloadService:
         self.gcs_service = GCSService()
     
     def _generate_filename(self, question: Question) -> str:
-        """Generate consistent filename for question PDF"""
-        return f"question_{question.question_number}_{question.question_type.lower()}.pdf"
+        """Generate consistent filename for question PDF with session identifiers"""
+        question_type = question.question_type.lower().replace(' ', '_')
+        
+        # Include session identifiers to prevent filename collisions
+        if question.lok_sabha and question.session:
+            return f"question_ls{question.lok_sabha.number}_s{question.session.session_number}_{question.question_number}_{question_type}.pdf"
+        elif question.master_data:
+            # Fallback to master data for session info
+            return f"question_ls{question.master_data.lok_sabha_number}_s{question.master_data.session_number}_{question.question_number}_{question_type}.pdf"
+        else:
+            # Fallback to basic filename (legacy support)
+            logger.warning(f"No session info available for Q.{question.question_number}, using basic filename")
+            return f"question_{question.question_number}_{question_type}.pdf"
     
     def queue_question_pdf_download(self, question: Question, pdf_url: str) -> DocumentFile:
         """Queue a question PDF for download using the existing infrastructure"""
@@ -102,7 +113,69 @@ class QuestionDownloadService:
                     else:
                         logger.info(f"Downloading question PDF from {pdf_url} (attempt {attempt + 1}/{max_retries})")
                     
-                    response = self.session.get(pdf_url, timeout=30, stream=True, verify=True)
+                    # Use proper headers for PDF download (same as debate scraper)
+                    pdf_headers = {
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Connection': 'keep-alive',
+                        'Referer': 'https://sansad.in/' if 'sansad.in' in pdf_url else 'https://eparlib.sansad.in/',
+                        'Sec-Fetch-Dest': 'document',
+                        'Sec-Fetch-Mode': 'navigate',
+                        'Sec-Fetch-Site': 'same-origin',
+                        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
+                        'sec-ch-ua': '"Chromium";v="140", "Not=A?Brand";v="24", "Brave";v="140"',
+                        'sec-ch-ua-mobile': '?0',
+                        'sec-ch-ua-platform': '"macOS"',
+                        'Upgrade-Insecure-Requests': '1'
+                    }
+                    
+                    # URL encode the PDF URL to handle spaces and special characters
+                    from urllib.parse import quote
+                    
+                    # Split URL and encode path properly
+                    if '?' in pdf_url:
+                        base_url, params = pdf_url.split('?', 1)
+                        # Only encode the path part, not the domain
+                        url_parts = base_url.split('/')
+                        encoded_parts = url_parts[:3] + [quote(part, safe='') for part in url_parts[3:]]
+                        encoded_url = '/'.join(encoded_parts) + '?' + params
+                    else:
+                        url_parts = pdf_url.split('/')
+                        encoded_parts = url_parts[:3] + [quote(part, safe='') for part in url_parts[3:]]
+                        encoded_url = '/'.join(encoded_parts)
+                    
+                    logger.info(f"Downloading from encoded URL: {encoded_url}")
+                    
+                    # Download PDF with proper headers and SSL settings
+                    response = self.session.get(encoded_url, headers=pdf_headers, timeout=60, stream=True, verify=False)
+                    
+                    # If we get 403, try to establish session by visiting the main page first
+                    if response.status_code == 403:
+                        logger.info("PDF access forbidden, attempting to establish session...")
+                        
+                        # Visit main questions page to establish session
+                        session_headers = {
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                            'Accept-Language': 'en-US,en;q=0.9',
+                            'Connection': 'keep-alive',
+                            'User-Agent': pdf_headers['User-Agent'],
+                            'Upgrade-Insecure-Requests': '1'
+                        }
+                        
+                        try:
+                            # Visit main page to get session cookies
+                            if 'sansad.in' in pdf_url:
+                                session_resp = self.session.get('https://sansad.in/ls/questions/questions-and-answers', headers=session_headers, timeout=30)
+                            else:
+                                session_resp = self.session.get('https://eparlib.sansad.in/', headers=session_headers, timeout=30)
+                                
+                            if session_resp.status_code == 200:
+                                logger.info("Session established, retrying PDF download...")
+                                # Retry PDF download with updated session
+                                response = self.session.get(encoded_url, headers=pdf_headers, timeout=60, stream=True, verify=False)
+                        except Exception as e:
+                            logger.warning(f"Failed to establish session: {e}")
+                    
                     response.raise_for_status()
                     break  # Success, exit retry loop
                     
@@ -150,7 +223,16 @@ class QuestionDownloadService:
             # Upload to Google Cloud Storage
             try:
                 bucket_name = self.gcs_service.get_bucket_for_document_type('parl_question')
-                object_key = self.gcs_service.generate_object_key('parl_question', file_name)
+                
+                # Generate object key with session-based path for better organization
+                if question.lok_sabha and question.session:
+                    session_path = f"ls{question.lok_sabha.number}/session{question.session.session_number}"
+                elif question.master_data:
+                    session_path = f"ls{question.master_data.lok_sabha_number}/session{question.master_data.session_number}"
+                else:
+                    session_path = "unknown_session"
+                
+                object_key = self.gcs_service.generate_object_key('parl_question', file_name, session_path)
                 
                 # Update GCS upload status
                 doc_file.gcs_upload_status = 'uploading'
@@ -402,11 +484,6 @@ class QuestionDownloadService:
                     logger.error(error_msg)
             
             return results
-    
-    def _generate_filename(self, question: Question) -> str:
-        """Generate consistent filename for question PDF"""
-        question_type = question.question_type.lower().replace(' ', '_')
-        return f"question_{question.question_number}_{question_type}.pdf"
     
     def get_download_statistics(self) -> Dict:
         """Get download statistics for questions"""
