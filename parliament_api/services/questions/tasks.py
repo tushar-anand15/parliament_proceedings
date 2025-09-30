@@ -6,9 +6,11 @@ import logging
 import os
 import requests
 
-from .models import Question, QuestionMasterData, LokSabha, Session
+from .models import Question, QuestionMasterData, LokSabha, Session, ParliamentInstitution
 from services.files.models import DocumentFile, DownloadQueue
 from .question_download_service import QuestionDownloadService
+from .rs_master_data_service import RajyaSabhaMasterDataService
+from services.files.pdf_download_service import UnifiedPDFDownloadService
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +39,8 @@ def download_question_pdf_task(self, question_id: int, pdf_url: str = None):
         # Get the question
         question = Question.objects.get(id=question_id)
         
-        # Initialize download service
-        service = QuestionDownloadService()
+        # Initialize unified download service
+        service = UnifiedPDFDownloadService()
         
         # Update progress
         self.update_state(
@@ -46,19 +48,9 @@ def download_question_pdf_task(self, question_id: int, pdf_url: str = None):
             meta={'status': f'Downloading PDF for Q.{question.question_number}', 'progress': 25}
         )
         
-        # Use provided URL or get from question
-        if not pdf_url:
-            pdf_urls = question.pdf_files if isinstance(question.pdf_files, list) else []
-            if not pdf_urls:
-                return {
-                    'status': 'FAILED',
-                    'question_id': question_id,
-                    'error': 'No PDF URL available for this question'
-                }
-            pdf_url = pdf_urls[0]
-        
-        # Download PDF
-        success = service.download_question_pdf(question, pdf_url)
+        # Download PDF using unified service
+        result = service.download_question_pdf_unified(question, pdf_url)
+        success = result.get('success', False)
         
         if success:
             # Update progress
@@ -72,6 +64,9 @@ def download_question_pdf_task(self, question_id: int, pdf_url: str = None):
                 'question_id': question_id,
                 'question_number': question.question_number,
                 'pdf_url': pdf_url,
+                'filename': result.get('filename', ''),
+                'file_size': result.get('file_size', 0),
+                'gcs_uploaded': result.get('gcs_result', {}).get('success', False),
                 'message': f'PDF downloaded successfully for Q.{question.question_number}'
             }
         else:
@@ -79,7 +74,7 @@ def download_question_pdf_task(self, question_id: int, pdf_url: str = None):
                 'status': 'FAILED',
                 'question_id': question_id,
                 'question_number': question.question_number,
-                'error': 'PDF download failed'
+                'error': result.get('error', 'PDF download failed')
             }
     
     except Question.DoesNotExist:
@@ -476,6 +471,330 @@ def bulk_download_question_pdfs_from_master_data_task(self, master_data_ids: lis
             meta={'status': 'Task failed', 'error': str(e)}
         )
         
+        return {
+            'status': 'FAILED',
+            'error': str(e)
+        }
+
+
+# ============================================================================
+# RAJYA SABHA TASKS (Integrated into existing tasks.py)
+# ============================================================================
+
+@shared_task(bind=True, name='rs_questions.scrape_rs_questions',
+              autoretry_for=(Exception,),
+              retry_kwargs={'max_retries': 3, 'countdown': 60},
+              retry_backoff=True,
+              retry_backoff_max=300,
+              retry_jitter=True)
+def scrape_rs_questions_task(self, 
+                            session_no: str,
+                            download_pdfs: bool = True,
+                            job_id: int = None):
+    """
+    Celery task for scraping Rajya Sabha questions
+    
+    Args:
+        session_no: RS Session number (e.g., "268")
+        download_pdfs: Whether to download PDFs
+        job_id: ScrapingJob ID to update (optional)
+    """
+    try:
+        # Update task status
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': 'Starting RS question scraping...', 'progress': 0}
+        )
+        
+        # Initialize RS service
+        rs_service = RajyaSabhaMasterDataService()
+        
+        # Update progress
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': f'Fetching RS questions for session {session_no}...', 'progress': 10}
+        )
+        
+        # Fetch questions for session
+        result = rs_service.fetch_questions_for_session(session_no)
+        
+        if result.get('status') != 'SUCCESS':
+            error_msg = f"Failed to fetch RS questions: {result.get('message', 'Unknown error')}"
+            logger.error(error_msg)
+            return {'status': 'FAILED', 'error': error_msg}
+        
+        questions_created = result.get('created', 0)
+        questions_updated = result.get('updated', 0)
+        total_questions = questions_created + questions_updated
+        
+        # Update progress
+        self.update_state(
+            state='PROGRESS',
+            meta={
+                'status': f'Scraped {total_questions} RS questions, preparing downloads...',
+                'progress': 50,
+                'questions_created': questions_created,
+                'questions_updated': questions_updated
+            }
+        )
+        
+        pdfs_queued = 0
+        if download_pdfs:
+            # Get RS questions with PDF URLs for this session
+            rs_institution = ParliamentInstitution.objects.get(name='rajya_sabha')
+            questions_with_pdfs = QuestionMasterData.objects.filter(
+                parent_institution=rs_institution,
+                session_number=session_no,
+                is_processed=False  # Only process unprocessed questions
+            ).exclude(questions_file_path='')
+            
+            logger.info(f"Found {questions_with_pdfs.count()} RS questions with PDFs to download")
+            
+            # Prepare bulk download list
+            download_specs = []
+            for master_data in questions_with_pdfs:
+                download_specs.append({
+                    'document_type': 'rs_question',
+                    'document_id': master_data.id,
+                    'pdf_url': master_data.get_pdf_url()
+                })
+            
+            if download_specs:
+                # Update progress
+                self.update_state(
+                    state='PROGRESS',
+                    meta={
+                        'status': f'Queuing {len(download_specs)} RS question PDFs for download...',
+                        'progress': 75
+                    }
+                )
+                
+                # Queue bulk download task
+                from services.files.tasks import bulk_download_pdfs_unified_task
+                bulk_task = bulk_download_pdfs_unified_task.delay(download_specs)
+                pdfs_queued = len(download_specs)
+                
+                logger.info(f"Queued {pdfs_queued} RS question PDFs for download (task: {bulk_task.id})")
+        
+        # Final progress update
+        self.update_state(
+            state='PROGRESS',
+            meta={
+                'status': 'RS question scraping completed',
+                'progress': 100,
+                'questions_created': questions_created,
+                'questions_updated': questions_updated,
+                'pdfs_queued': pdfs_queued
+            }
+        )
+        
+        return {
+            'status': 'SUCCESS',
+            'institution': 'rajya_sabha',
+            'session_no': session_no,
+            'questions_created': questions_created,
+            'questions_updated': questions_updated,
+            'total_questions': total_questions,
+            'pdfs_queued': pdfs_queued,
+            'message': f'Successfully scraped {total_questions} RS questions for session {session_no}'
+        }
+        
+    except Exception as e:
+        error_msg = f"RS question scraping task failed: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        return {'status': 'FAILED', 'error': error_msg}
+
+
+@shared_task(bind=True, name='rs_questions.download_rs_question_pdf',
+              autoretry_for=(Exception,),
+              retry_kwargs={'max_retries': 3, 'countdown': 60},
+              retry_backoff=True,
+              retry_backoff_max=300,
+              retry_jitter=True)
+def download_rs_question_pdf_task(self, master_data_id: int, pdf_url: str = None):
+    """
+    Celery task for downloading a single RS question PDF
+    
+    Args:
+        master_data_id: ID of the QuestionMasterData to download PDF for
+        pdf_url: Optional specific PDF URL to download
+    """
+    try:
+        # Update task status
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': 'Starting RS question PDF download...', 'progress': 0}
+        )
+        
+        # Get the master data
+        master_data = QuestionMasterData.objects.get(id=master_data_id)
+        
+        # Use unified download task
+        from services.files.tasks import download_pdf_unified_task
+        result = download_pdf_unified_task.delay('rs_question', master_data_id, pdf_url).get()
+        
+        if result['status'] == 'SUCCESS':
+            # Update progress
+            self.update_state(
+                state='PROGRESS',
+                meta={'status': 'RS question PDF downloaded successfully', 'progress': 100}
+            )
+            
+            return {
+                'status': 'SUCCESS',
+                'master_data_id': master_data_id,
+                'question_number': master_data.question_number,
+                'session_number': master_data.session_number,
+                'filename': result['filename'],
+                'message': f'PDF downloaded successfully for RS Q.{master_data.question_number}'
+            }
+        else:
+            return {
+                'status': 'FAILED',
+                'master_data_id': master_data_id,
+                'question_number': master_data.question_number,
+                'error': result.get('error', 'Download failed')
+            }
+    
+    except QuestionMasterData.DoesNotExist:
+        return {
+            'status': 'FAILED',
+            'master_data_id': master_data_id,
+            'error': 'RS Question master data not found'
+        }
+    except Exception as e:
+        logger.error(f"RS question PDF download task failed for master_data {master_data_id}: {str(e)}")
+        return {
+            'status': 'FAILED',
+            'master_data_id': master_data_id,
+            'error': str(e)
+        }
+
+
+@shared_task(bind=True, name='rs_questions.bulk_download_rs_question_pdfs',
+              autoretry_for=(Exception,),
+              retry_kwargs={'max_retries': 2, 'countdown': 120},
+              retry_backoff=True,
+              retry_backoff_max=600,
+              retry_jitter=True)
+def bulk_download_rs_question_pdfs_task(self, master_data_ids: list):
+    """
+    Celery task for downloading multiple RS question PDFs
+    
+    Args:
+        master_data_ids: List of QuestionMasterData IDs to download PDFs for
+    """
+    try:
+        total_questions = len(master_data_ids)
+        
+        # Update initial progress
+        self.update_state(
+            state='PROGRESS',
+            meta={
+                'status': f'Starting bulk download of {total_questions} RS questions',
+                'progress': 0,
+                'total': total_questions
+            }
+        )
+        
+        # Prepare download specifications for unified bulk task
+        download_specs = []
+        for master_data_id in master_data_ids:
+            try:
+                master_data = QuestionMasterData.objects.get(id=master_data_id)
+                pdf_url = master_data.get_pdf_url()
+                
+                if pdf_url:
+                    download_specs.append({
+                        'document_type': 'rs_question',
+                        'document_id': master_data_id,
+                        'pdf_url': pdf_url
+                    })
+            except QuestionMasterData.DoesNotExist:
+                logger.warning(f"RS QuestionMasterData {master_data_id} not found")
+                continue
+        
+        if not download_specs:
+            return {
+                'status': 'FAILED',
+                'error': 'No valid RS questions found for download'
+            }
+        
+        # Update progress
+        self.update_state(
+            state='PROGRESS',
+            meta={
+                'status': f'Executing bulk download of {len(download_specs)} RS question PDFs...',
+                'progress': 25
+            }
+        )
+        
+        # Execute unified bulk download
+        from services.files.tasks import bulk_download_pdfs_unified_task
+        bulk_result = bulk_download_pdfs_unified_task.delay(download_specs).get()
+        
+        # Final progress update
+        self.update_state(
+            state='PROGRESS',
+            meta={
+                'status': 'RS bulk download completed',
+                'progress': 100,
+                'results': bulk_result
+            }
+        )
+        
+        return {
+            'status': 'SUCCESS',
+            'institution': 'rajya_sabha',
+            'total_questions': total_questions,
+            'download_specs_created': len(download_specs),
+            'bulk_result': bulk_result,
+            'message': f'Bulk download completed for {total_questions} RS questions'
+        }
+        
+    except Exception as e:
+        logger.error(f"RS bulk question PDF download task failed: {str(e)}")
+        return {
+            'status': 'FAILED',
+            'error': str(e)
+        }
+
+
+@shared_task(bind=True, name='rs_questions.initialize_rs_master_data')
+def initialize_rs_master_data_task(self, force_update: bool = False):
+    """
+    Celery task for initializing RS master data
+    
+    Args:
+        force_update: Whether to force update existing data
+    """
+    try:
+        # Update task status
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': 'Initializing RS master data...', 'progress': 0}
+        )
+        
+        # Initialize RS service
+        rs_service = RajyaSabhaMasterDataService()
+        
+        # Initialize master data
+        result = rs_service.initialize_rs_master_data(force_update=force_update)
+        
+        # Update progress
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': 'RS master data initialization completed', 'progress': 100}
+        )
+        
+        return {
+            'status': 'SUCCESS',
+            'result': result,
+            'message': 'RS master data initialization completed successfully'
+        }
+        
+    except Exception as e:
+        logger.error(f"RS master data initialization task failed: {str(e)}")
         return {
             'status': 'FAILED',
             'error': str(e)

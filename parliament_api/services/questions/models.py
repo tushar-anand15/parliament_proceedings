@@ -150,7 +150,7 @@ class QuestionMasterData(models.Model):
     last_fetched = models.DateTimeField(auto_now=True)
 
     class Meta:
-        unique_together = ['parent_institution', 'question_number', 'lok_sabha_number', 'session_number']
+        unique_together = ['parent_institution', 'question_number', 'lok_sabha_number', 'session_number', 'question_type']
         ordering = ['-date', '-question_number']
         indexes = [
             models.Index(fields=['parent_institution', 'lok_sabha_number', 'session_number']),

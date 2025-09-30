@@ -270,14 +270,14 @@ class GCSService:
         Get appropriate bucket name for document type
         
         Args:
-            document_category: Document category (parl_debate, parl_question, etc.)
+            document_category: Document category (parl_debate, parl_question, parl_rs_question, etc.)
             
         Returns:
             Bucket name string
         """
         if document_category == 'parl_debate':
             return self.debates_bucket_name
-        elif document_category == 'parl_question':
+        elif document_category in ['parl_question', 'parl_rs_question']:
             return self.questions_bucket_name
         else:
             # Default to questions bucket for other types

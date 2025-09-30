@@ -18,6 +18,7 @@ class DocumentFile(models.Model):
     
     DOCUMENT_CATEGORIES = [
         ('parl_question', 'Parliamentary Question'),
+        ('parl_rs_question', 'Rajya Sabha Question'),
         ('parl_debate', 'Parliamentary Debate'),
         ('parl_answer', 'Parliamentary Answer'),
         ('parl_appendix', 'Parliamentary Appendix'),
@@ -28,6 +29,7 @@ class DocumentFile(models.Model):
     
     FILE_TYPES = [
         ('question', 'Question Document'),
+        ('rs_question', 'Rajya Sabha Question Document'),
         ('answer', 'Answer Document'),
         ('combined', 'Combined Q&A Document'),
         ('debate', 'Debate Transcript'),

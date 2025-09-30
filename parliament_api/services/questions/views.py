@@ -10,6 +10,7 @@ from drf_spectacular.types import OpenApiTypes
 from .models import Question, QuestionMasterData, LokSabha, Session, Member, Ministry
 from .question_download_service import QuestionDownloadService
 from .master_data_service import QuestionMasterDataService
+from .rs_master_data_service import RajyaSabhaMasterDataService
 
 
 class QuestionViewSet(viewsets.ModelViewSet):
@@ -895,4 +896,388 @@ class QuestionSessionSummaryView(APIView):
         except Exception as e:
             return Response({
                 'error': f'Failed to get session summary: {str(e)}'
+            }, status=500)
+
+
+# ============================================================================
+# RAJYA SABHA VIEWS (Integrated into existing views.py)
+# ============================================================================
+
+class RSQuestionMasterDataView(APIView):
+    """Rajya Sabha Question Master Data endpoints"""
+    permission_classes = [IsAuthenticated]
+    
+    @extend_schema(
+        description="Get Rajya Sabha question master data statistics and overview",
+        tags=['RS Questions']
+    )
+    def get(self, request):
+        """Get RS question master data overview"""
+        try:
+            rs_service = RajyaSabhaMasterDataService()
+            stats = rs_service.get_rs_statistics()
+            
+            return Response({
+                'status': 'success',
+                'data': stats,
+                'message': 'RS question master data retrieved successfully'
+            })
+            
+        except Exception as e:
+            logger.error(f"Failed to get RS master data: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': f'Failed to get RS master data: {str(e)}'
+            }, status=500)
+
+
+class RSQuestionStatisticsView(APIView):
+    """Get RS question statistics"""
+    permission_classes = [IsAuthenticated]
+    
+    @extend_schema(
+        description="Get detailed statistics about RS questions",
+        tags=['RS Questions']
+    )
+    def get(self, request):
+        """Get RS question statistics"""
+        try:
+            from .models import ParliamentInstitution
+            from django.db.models import Count, Q
+            
+            rs_service = RajyaSabhaMasterDataService()
+            stats = rs_service.get_rs_statistics()
+            
+            # Add additional statistics
+            rs_institution = ParliamentInstitution.objects.get(name='rajya_sabha')
+            
+            # Session-wise breakdown
+            session_stats = QuestionMasterData.objects.filter(
+                parent_institution=rs_institution
+            ).values('session_number').annotate(
+                total=Count('id'),
+                with_pdf=Count('id', filter=Q(questions_file_path__gt='')),
+                processed=Count('id', filter=Q(is_processed=True)),
+                starred=Count('id', filter=Q(question_type='STARRED')),
+                unstarred=Count('id', filter=Q(question_type='UNSTARRED'))
+            ).order_by('-session_number')[:20]  # Top 20 recent sessions
+            
+            # Ministry-wise breakdown
+            ministry_stats = QuestionMasterData.objects.filter(
+                parent_institution=rs_institution
+            ).exclude(ministry='').values('ministry').annotate(
+                total=Count('id')
+            ).order_by('-total')[:15]  # Top 15 ministries
+            
+            stats.update({
+                'session_breakdown': list(session_stats),
+                'ministry_breakdown': list(ministry_stats)
+            })
+            
+            return Response({
+                'status': 'success',
+                'data': stats,
+                'message': 'RS question statistics retrieved successfully'
+            })
+            
+        except ParliamentInstitution.DoesNotExist:
+            return Response({
+                'status': 'error',
+                'message': 'Rajya Sabha institution not found'
+            }, status=404)
+        except Exception as e:
+            logger.error(f"Failed to get RS statistics: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': f'Failed to get RS statistics: {str(e)}'
+            }, status=500)
+
+
+class RSQuestionMasterDataListView(APIView):
+    """List Rajya Sabha question master data with filtering"""
+    permission_classes = [IsAuthenticated]
+    
+    @extend_schema(
+        description="List RS question master data with filtering options",
+        tags=['RS Questions']
+    )
+    def get(self, request):
+        """List RS question master data"""
+        try:
+            from .models import ParliamentInstitution
+            
+            # Get query parameters
+            session_number = request.GET.get('session_number')
+            question_type = request.GET.get('question_type')
+            ministry = request.GET.get('ministry')
+            has_pdf = request.GET.get('has_pdf')
+            limit = int(request.GET.get('limit', 100))
+            offset = int(request.GET.get('offset', 0))
+            
+            # Get RS institution
+            rs_institution = ParliamentInstitution.objects.get(name='rajya_sabha')
+            
+            # Build queryset
+            queryset = QuestionMasterData.objects.filter(parent_institution=rs_institution)
+            
+            if session_number:
+                queryset = queryset.filter(session_number=session_number)
+            
+            if question_type:
+                queryset = queryset.filter(question_type=question_type)
+            
+            if ministry:
+                queryset = queryset.filter(ministry__icontains=ministry)
+            
+            if has_pdf == 'true':
+                queryset = queryset.exclude(questions_file_path='')
+            elif has_pdf == 'false':
+                queryset = queryset.filter(questions_file_path='')
+            
+            # Get total count
+            total_count = queryset.count()
+            
+            # Apply pagination
+            questions = queryset.order_by('-date', '-question_number')[offset:offset+limit]
+            
+            # Serialize data
+            questions_data = []
+            for q in questions:
+                questions_data.append({
+                    'id': q.id,
+                    'question_number': q.question_number,
+                    'subjects': q.subjects,
+                    'question_type': q.question_type,
+                    'ministry': q.ministry,
+                    'session_number': q.session_number,
+                    'date': q.date.isoformat() if q.date else None,
+                    'has_pdf': bool(q.questions_file_path),
+                    'pdf_url': q.questions_file_path,
+                    'pdf_url_hindi': q.questions_file_path_hindi,
+                    'is_processed': q.is_processed,
+                    'members': q.members,
+                    'created_at': q.created_at.isoformat(),
+                    'last_fetched': q.last_fetched.isoformat()
+                })
+            
+            return Response({
+                'status': 'success',
+                'data': {
+                    'questions': questions_data,
+                    'pagination': {
+                        'total': total_count,
+                        'limit': limit,
+                        'offset': offset,
+                        'has_next': offset + limit < total_count,
+                        'has_previous': offset > 0
+                    }
+                },
+                'message': f'Retrieved {len(questions_data)} RS questions'
+            })
+            
+        except ParliamentInstitution.DoesNotExist:
+            return Response({
+                'status': 'error',
+                'message': 'Rajya Sabha institution not found. Please initialize RS data first.'
+            }, status=404)
+        except Exception as e:
+            logger.error(f"Failed to list RS questions: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': f'Failed to list RS questions: {str(e)}'
+            }, status=500)
+
+
+class RSQuestionScrapingView(APIView):
+    """Start RS question scraping"""
+    permission_classes = [IsAuthenticated]
+    
+    @extend_schema(
+        description="Start scraping RS questions for a specific session",
+        tags=['RS Questions']
+    )
+    def post(self, request):
+        """Start RS question scraping"""
+        try:
+            from .tasks import scrape_rs_questions_task
+            
+            session_number = request.data.get('session_number', '268')  # Default to current session
+            download_pdfs = request.data.get('download_pdfs', True)
+            
+            # Start scraping task
+            task = scrape_rs_questions_task.delay(
+                session_no=session_number,
+                download_pdfs=download_pdfs
+            )
+            
+            return Response({
+                'status': 'success',
+                'data': {
+                    'task_id': task.id,
+                    'session_number': session_number,
+                    'download_pdfs': download_pdfs
+                },
+                'message': f'Started RS question scraping for session {session_number}'
+            })
+            
+        except Exception as e:
+            logger.error(f"Failed to start RS scraping: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': f'Failed to start RS scraping: {str(e)}'
+            }, status=500)
+
+
+class RSQuestionBulkDownloadView(APIView):
+    """Bulk download RS question PDFs"""
+    permission_classes = [IsAuthenticated]
+    
+    @extend_schema(
+        description="Queue multiple RS questions for PDF download",
+        tags=['RS Questions']
+    )
+    def post(self, request):
+        """Queue RS questions for bulk PDF download"""
+        try:
+            from .models import ParliamentInstitution
+            from .tasks import bulk_download_rs_question_pdfs_task
+            
+            master_data_ids = request.data.get('master_data_ids', [])
+            session_number = request.data.get('session_number')
+            download_all_session = request.data.get('download_all_session', False)
+            
+            if download_all_session and session_number:
+                # Download all questions for a specific session
+                rs_institution = ParliamentInstitution.objects.get(name='rajya_sabha')
+                session_questions = QuestionMasterData.objects.filter(
+                    parent_institution=rs_institution,
+                    session_number=session_number,
+                    is_processed=False
+                ).exclude(questions_file_path='')
+                
+                master_data_ids = list(session_questions.values_list('id', flat=True))
+                
+            elif not master_data_ids:
+                return Response({
+                    'status': 'error',
+                    'message': 'No master_data_ids provided and download_all_session is false'
+                }, status=400)
+            
+            if not master_data_ids:
+                return Response({
+                    'status': 'error',
+                    'message': 'No RS questions found for download'
+                }, status=404)
+            
+            # Start bulk download task
+            task = bulk_download_rs_question_pdfs_task.delay(master_data_ids)
+            
+            return Response({
+                'status': 'success',
+                'data': {
+                    'task_id': task.id,
+                    'questions_queued': len(master_data_ids),
+                    'session_number': session_number if download_all_session else None
+                },
+                'message': f'Queued {len(master_data_ids)} RS questions for bulk download'
+            })
+            
+        except ParliamentInstitution.DoesNotExist:
+            return Response({
+                'status': 'error',
+                'message': 'Rajya Sabha institution not found'
+            }, status=404)
+        except Exception as e:
+            logger.error(f"Failed to queue RS bulk download: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': f'Failed to queue bulk download: {str(e)}'
+            }, status=500)
+
+
+class RSQuestionInitializeView(APIView):
+    """Initialize RS master data"""
+    permission_classes = [IsAuthenticated]
+    
+    @extend_schema(
+        description="Initialize Rajya Sabha master data (sessions and questions)",
+        tags=['RS Questions']
+    )
+    def post(self, request):
+        """Initialize RS master data"""
+        try:
+            from .tasks import initialize_rs_master_data_task
+            
+            force_update = request.data.get('force_update', False)
+            
+            # Start initialization task
+            task = initialize_rs_master_data_task.delay(force_update=force_update)
+            
+            return Response({
+                'status': 'success',
+                'data': {
+                    'task_id': task.id,
+                    'force_update': force_update
+                },
+                'message': 'Started RS master data initialization'
+            })
+            
+        except Exception as e:
+            logger.error(f"Failed to start RS initialization: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': f'Failed to start RS initialization: {str(e)}'
+            }, status=500)
+
+
+class RSQuestionTaskStatusView(APIView):
+    """Check RS task status"""
+    permission_classes = [IsAuthenticated]
+    
+    @extend_schema(
+        description="Check status of RS question Celery tasks",
+        tags=['RS Questions']
+    )
+    def get(self, request, task_id):
+        """Get task status"""
+        try:
+            from celery.result import AsyncResult
+            
+            task_result = AsyncResult(task_id)
+            
+            if task_result.state == 'PENDING':
+                response = {
+                    'state': task_result.state,
+                    'status': 'Task is waiting to be processed'
+                }
+            elif task_result.state == 'PROGRESS':
+                response = {
+                    'state': task_result.state,
+                    'status': task_result.info.get('status', ''),
+                    'progress': task_result.info.get('progress', 0),
+                    'details': task_result.info
+                }
+            elif task_result.state == 'SUCCESS':
+                response = {
+                    'state': task_result.state,
+                    'status': 'Task completed successfully',
+                    'result': task_result.result
+                }
+            else:  # FAILURE
+                response = {
+                    'state': task_result.state,
+                    'status': 'Task failed',
+                    'error': str(task_result.info)
+                }
+            
+            return Response({
+                'status': 'success',
+                'data': response
+            })
+            
+        except Exception as e:
+            logger.error(f"Failed to get task status: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': f'Failed to get task status: {str(e)}'
             }, status=500)

@@ -32,4 +32,13 @@ urlpatterns = [
     path('process-queue/', views.QuestionDownloadQueueView.as_view(), name='question-process-queue'),
     path('download-statistics/', views.QuestionDownloadStatisticsView.as_view(), name='question-download-statistics'),
     path('populate/', views.QuestionPopulateView.as_view(), name='question-populate'),
+    
+    # Rajya Sabha endpoints (integrated)
+    path('rs/master-data/', views.RSQuestionMasterDataView.as_view(), name='rs-question-master-data'),
+    path('rs/master-data/list/', views.RSQuestionMasterDataListView.as_view(), name='rs-question-master-data-list'),
+    path('rs/statistics/', views.RSQuestionStatisticsView.as_view(), name='rs-question-statistics'),
+    path('rs/scrape/', views.RSQuestionScrapingView.as_view(), name='rs-question-scraping'),
+    path('rs/bulk-download/', views.RSQuestionBulkDownloadView.as_view(), name='rs-question-bulk-download'),
+    path('rs/initialize/', views.RSQuestionInitializeView.as_view(), name='rs-question-initialize'),
+    path('rs/task-status/<str:task_id>/', views.RSQuestionTaskStatusView.as_view(), name='rs-question-task-status'),
 ] 

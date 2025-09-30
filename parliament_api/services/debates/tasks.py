@@ -7,6 +7,7 @@ from services.questions.models import LokSabha, Session
 from services.scraper.models import ScrapingJob
 from .models import Debate, DebateSpeech, DebateTag, SessionDateCache
 from .debate_scraper_service import DebateScraperService
+from services.files.pdf_download_service import UnifiedPDFDownloadService
 
 logger = logging.getLogger(__name__)
 
@@ -342,31 +343,26 @@ def download_pdf_task(self, debate_id: int):
             meta={'status': f'Downloading PDF for {debate.title}', 'progress': 0}
         )
         
-        # Initialize scraper service
-        scraper = DebateScraperService()
+        # Initialize unified PDF service
+        pdf_service = UnifiedPDFDownloadService()
         
-        # Download PDF
-        pdf_path = scraper.download_debate_pdf(debate)
+        # Download PDF using unified service
+        result = pdf_service.download_debate_pdf_unified(debate)
         
-        if pdf_path:
-            debate.status = 'downloaded'
-            debate.pdf_path = pdf_path
-            debate.save()
-            
+        if result['success']:
             return {
                 'status': 'SUCCESS',
                 'debate_id': debate_id,
-                'pdf_path': pdf_path,
-                'message': f'PDF downloaded successfully for {debate.title}'
+                'filename': result.get('filename', ''),
+                'file_size': result.get('file_size', 0),
+                'gcs_uploaded': result.get('gcs_result', {}).get('success', False),
+                'message': f'PDF downloaded successfully for {debate.debate_id}'
             }
         else:
-            debate.status = 'download_failed'
-            debate.save()
-            
             return {
                 'status': 'FAILED',
                 'debate_id': debate_id,
-                'error': 'PDF download failed'
+                'error': result.get('error', 'PDF download failed')
             }
     
     except Debate.DoesNotExist:
