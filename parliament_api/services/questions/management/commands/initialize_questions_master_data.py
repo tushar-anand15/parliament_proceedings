@@ -3,12 +3,32 @@ from django.utils import timezone
 from django.db import transaction
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
+import random
 import logging
+import sys
 from services.questions.master_data_service import QuestionMasterDataService
 from services.questions.rs_master_data_service import RajyaSabhaMasterDataService
 from services.questions.models import QuestionMasterData, Session, LokSabha, ParliamentInstitution
 
 logger = logging.getLogger(__name__)
+
+
+def show_progress_bar(current, total, prefix='Progress', bar_length=40, suffix=''):
+    """Show a progress bar in the terminal"""
+    if total == 0:
+        return
+    
+    percent = float(current) * 100 / total
+    filled_length = int(bar_length * current // total)
+    bar = '█' * filled_length + '░' * (bar_length - filled_length)
+    
+    # Use carriage return to overwrite the line
+    sys.stdout.write(f'\r{prefix} [{bar}] {percent:.1f}% {suffix}')
+    sys.stdout.flush()
+    
+    if current == total:
+        sys.stdout.write('\n')
+        sys.stdout.flush()
 
 
 class Command(BaseCommand):
@@ -23,8 +43,8 @@ class Command(BaseCommand):
         parser.add_argument(
             '--workers',
             type=int,
-            default=5,
-            help='Number of parallel workers (default: 5)',
+            default=10,
+            help='Number of parallel workers (default: 10)',
         )
         parser.add_argument(
             '--recent-only',
@@ -59,6 +79,10 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+        # Suppress INFO logs during initialization (only show WARNING and above)
+        logging.getLogger('services.questions.master_data_service').setLevel(logging.WARNING)
+        logging.getLogger('services.questions.rs_master_data_service').setLevel(logging.WARNING)
+        
         self.stdout.write(
             self.style.SUCCESS('🏛️ Parliament Questions Master Data - PARALLEL INITIALIZATION (LS + RS)')
         )
@@ -137,7 +161,7 @@ class Command(BaseCommand):
         else:
             sessions_to_process = Session.objects.all().order_by('lok_sabha__number', 'session_number')
             self.stdout.write(f'🚀 Processing ALL LS sessions: {sessions_to_process.count()} sessions')
-        
+            
         # Filter for incremental update
         if incremental_update:
             sessions_without_questions = []
@@ -223,6 +247,8 @@ class Command(BaseCommand):
             
             # Collect results as they complete
             completed = 0
+            start_time = time.time()
+            
             for future in as_completed(future_to_session):
                 session_number = future_to_session[future]
                 completed += 1
@@ -233,23 +259,17 @@ class Command(BaseCommand):
                     results['total_created'] += session_result.get('created', 0)
                     results['total_updated'] += session_result.get('updated', 0)
                     
-                    # Count question types
-                    rs_institution = ParliamentInstitution.objects.get(name='rajya_sabha')
-                    session_starred = QuestionMasterData.objects.filter(
-                        parent_institution=rs_institution,
-                        session_number=session_number,
-                        question_type='STARRED'
-                    ).count()
-                    session_unstarred = QuestionMasterData.objects.filter(
-                        parent_institution=rs_institution,
-                        session_number=session_number,
-                        question_type='UNSTARRED'
-                    ).count()
+                    # Calculate time remaining
+                    elapsed = time.time() - start_time
+                    rate = completed / elapsed if elapsed > 0 else 0
+                    remaining = (len(session_numbers) - completed) / rate if rate > 0 else 0
                     
-                    self.stdout.write(
-                        f'✅ ({completed}/{len(session_numbers)}) RS Session{session_number}: '
-                        f'{session_result["created"]} created, {session_result["updated"]} updated '
-                        f'({session_starred} starred, {session_unstarred} unstarred)'
+                    # Show progress bar
+                    show_progress_bar(
+                        completed,
+                        len(session_numbers),
+                        prefix='   RS Sessions',
+                        suffix=f'({results["total_created"]:,} created, {results["total_updated"]:,} updated) ~{remaining/60:.0f}min'
                     )
                     
                 except Exception as e:
@@ -274,10 +294,15 @@ class Command(BaseCommand):
         return results
     
     def _process_single_rs_session(self, rs_service, session_number, timeout=500, max_retries=3):
-        """Process a single RS session with retry logic"""
+        """Process a single RS session with retry logic and randomized delay"""
         for attempt in range(max_retries):
             try:
-                if attempt > 0:
+                # Add randomized delay (0.2-0.5 seconds) to avoid overwhelming API
+                # Skip on retries since exponential backoff will handle it
+                if attempt == 0:
+                    random_delay = random.uniform(0.2, 0.5)
+                    time.sleep(random_delay)
+                elif attempt > 0:
                     delay = min(2 ** attempt, 60)
                     time.sleep(delay)
                     logger.info(f"Retry {attempt + 1}/{max_retries} for RS Session{session_number} after {delay}s delay")
@@ -462,6 +487,8 @@ class Command(BaseCommand):
             
             # Collect results as they complete
             completed = 0
+            start_time = time.time()
+            
             for future in as_completed(future_to_session):
                 session = future_to_session[future]
                 completed += 1
@@ -475,10 +502,17 @@ class Command(BaseCommand):
                     api_source = session_result.get('api_source', 'unknown')
                     fetched = session_result.get('fetched', 0)
                     
-                    self.stdout.write(
-                        f'✅ ({completed}/{len(sessions_list)}) LS{session.lok_sabha.number} '
-                        f'Session{session.session_number}: {session_result["created"]} created, '
-                        f'{session_result["updated"]} updated, {fetched} fetched via {api_source} API'
+                    # Calculate time remaining
+                    elapsed = time.time() - start_time
+                    rate = completed / elapsed if elapsed > 0 else 0
+                    remaining = (len(sessions_list) - completed) / rate if rate > 0 else 0
+                    
+                    # Show progress bar
+                    show_progress_bar(
+                        completed,
+                        len(sessions_list),
+                        prefix='   Sessions',
+                        suffix=f'({results["total_created"]:,} created, {results["total_updated"]:,} updated) ~{remaining/60:.0f}min'
                     )
                     
                     results['successful_sessions'].append({
@@ -507,12 +541,17 @@ class Command(BaseCommand):
         return results
     
     def _process_single_session(self, service, session, timeout=500, max_retries=3):
-        """Process a single session with exponential backoff - called by parallel workers"""
+        """Process a single session with exponential backoff and randomized delay - called by parallel workers"""
         
         for attempt in range(max_retries):
             try:
-                # Exponential backoff delay
-                if attempt > 0:
+                # Add randomized delay (0.2-0.5 seconds) to avoid overwhelming API
+                # Skip on retries since exponential backoff will handle it
+                if attempt == 0:
+                    random_delay = random.uniform(0.2, 0.5)
+                    time.sleep(random_delay)
+                elif attempt > 0:
+                    # Exponential backoff delay
                     delay = min(2 ** attempt, 60)  # Cap at 60 seconds
                     time.sleep(delay)
                     logger.info(f"Retry {attempt + 1}/{max_retries} for LS{session.lok_sabha.number} Session{session.session_number} after {delay}s delay")

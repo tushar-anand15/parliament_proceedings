@@ -42,26 +42,31 @@ class GCSService:
         try:
             bucket = self.client.bucket(bucket_name)
             
-            # Check if bucket exists
-            if not bucket.exists():
-                logger.info(f"Creating bucket: {bucket_name}")
-                # Create bucket in Mumbai region (asia-south1)
-                bucket = self.client.create_bucket(
-                    bucket_name,
-                    location='asia-south1'
-                )
-                
-                # Set up bucket lifecycle management
-                lifecycle_rules = [{
-                    'action': {'type': 'Delete'},
-                    'condition': {
-                        'age': 365 * 7  # Delete after 7 years
-                    }
-                }]
-                bucket.lifecycle_rules = lifecycle_rules
-                bucket.patch()
-                
-                logger.info(f"Bucket created successfully: {bucket_name}")
+            # Try to check if bucket exists - if we don't have permission, we'll catch it
+            try:
+                if not bucket.exists():
+                    logger.info(f"Creating bucket: {bucket_name}")
+                    # Create bucket in Mumbai region (asia-south1)
+                    bucket = self.client.create_bucket(
+                        bucket_name,
+                        location='asia-south1'
+                    )
+                    
+                    # Set up bucket lifecycle management
+                    lifecycle_rules = [{
+                        'action': {'type': 'Delete'},
+                        'condition': {
+                            'age': 365 * 7  # Delete after 7 years
+                        }
+                    }]
+                    bucket.lifecycle_rules = lifecycle_rules
+                    bucket.patch()
+                    
+                    logger.info(f"Bucket created successfully: {bucket_name}")
+            except gcs_exceptions.Forbidden:
+                # If we don't have permission to check existence, assume bucket exists
+                logger.warning(f"Cannot check if bucket exists (permission denied), assuming it exists: {bucket_name}")
+                pass
             
             return bucket
             
@@ -72,16 +77,37 @@ class GCSService:
             logger.error(f"Error accessing bucket {bucket_name}: {e}")
             raise
     
-    def upload_file(self, local_file_path: str, bucket_name: str, object_key: str, 
-                   metadata: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    def file_exists(self, bucket_name: str, object_key: str) -> bool:
         """
-        Upload file to GCS bucket
+        Check if a file already exists in GCS bucket
+        
+        Args:
+            bucket_name: GCS bucket name
+            object_key: Object key/path in bucket
+            
+        Returns:
+            True if file exists, False otherwise
+        """
+        try:
+            bucket = self._get_bucket(bucket_name)
+            blob = bucket.blob(object_key)
+            return blob.exists()
+        except Exception as e:
+            logger.warning(f"Error checking file existence: {e}")
+            return False
+    
+    def upload_file(self, local_file_path: str, bucket_name: str, object_key: str, 
+                   metadata: Optional[Dict[str, str]] = None, 
+                   skip_if_exists: bool = True) -> Dict[str, Any]:
+        """
+        Upload file to GCS bucket with collision detection
         
         Args:
             local_file_path: Path to local file
             bucket_name: GCS bucket name
             object_key: Object key/path in bucket
             metadata: Optional metadata dict
+            skip_if_exists: If True, skip upload if file already exists with same size
             
         Returns:
             Dict with upload result information
@@ -92,6 +118,35 @@ class GCSService:
             
             bucket = self._get_bucket(bucket_name)
             blob = bucket.blob(object_key)
+            
+            local_file_size = os.path.getsize(local_file_path)
+            
+            # Check if file already exists
+            if skip_if_exists and blob.exists():
+                blob.reload()
+                existing_size = blob.size
+                
+                # If same size, assume it's the same file (skip upload)
+                if existing_size == local_file_size:
+                    logger.info(f"File already exists with same size, skipping upload: {object_key}")
+                    return {
+                        'success': True,
+                        'bucket_name': bucket_name,
+                        'object_key': object_key,
+                        'file_size': existing_size,
+                        'uploaded_at': blob.updated.isoformat() if blob.updated else None,
+                        'gcs_url': f"gs://{bucket_name}/{object_key}",
+                        'etag': blob.etag,
+                        'skipped': True,
+                        'reason': 'File already exists with same size'
+                    }
+                else:
+                    # Different size - generate unique filename
+                    base_name, ext = os.path.splitext(object_key)
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    object_key = f"{base_name}_{timestamp}{ext}"
+                    blob = bucket.blob(object_key)
+                    logger.warning(f"File exists with different size, using unique name: {object_key}")
             
             # Set metadata
             if metadata:
@@ -105,20 +160,18 @@ class GCSService:
             with open(local_file_path, 'rb') as file_obj:
                 blob.upload_from_file(file_obj)
             
-            # Get file info
-            file_size = os.path.getsize(local_file_path)
-            
             result = {
                 'success': True,
                 'bucket_name': bucket_name,
                 'object_key': object_key,
-                'file_size': file_size,
+                'file_size': local_file_size,
                 'uploaded_at': timezone.now().isoformat(),
                 'gcs_url': f"gs://{bucket_name}/{object_key}",
-                'etag': blob.etag
+                'etag': blob.etag,
+                'skipped': False
             }
             
-            logger.info(f"Successfully uploaded file to GCS: {object_key} ({file_size} bytes)")
+            logger.info(f"Successfully uploaded file to GCS: {object_key} ({local_file_size} bytes)")
             return result
             
         except Exception as e:
@@ -289,18 +342,24 @@ class GCSService:
         Generate consistent object key for file storage
         
         Args:
-            document_category: Document category
+            document_category: Document category (parl_debate, parl_question, etc.)
             file_name: Original file name
-            additional_path: Additional path components
+            additional_path: Session-based path (e.g., 'ls18/session5' or 'rs/session268')
             
         Returns:
-            Object key string
+            Object key string (path within bucket)
+            
+        Note:
+            Buckets are already separated by document type, so we don't add another
+            subdirectory. Structure:
+            - Debates bucket: ls{number}/session{number}/{filename}
+            - Questions bucket: ls{number}/session{number}/{filename} or rs/session{number}/{filename}
         """
-        base_path = document_category.replace('parl_', '')  # debates, questions
-        
+        # Since buckets are already separated (debates vs questions),
+        # we don't need to add the document type as a subdirectory
         if additional_path:
-            object_key = f"{base_path}/{additional_path}/{file_name}"
+            object_key = f"{additional_path}/{file_name}"
         else:
-            object_key = f"{base_path}/{file_name}"
+            object_key = file_name
         
         return object_key

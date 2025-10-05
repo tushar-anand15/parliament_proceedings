@@ -30,7 +30,10 @@ logger = logging.getLogger(__name__)
 
 class DebateScraperService:
     """
-    Service for scraping parliamentary debates and downloading PDFs
+    Service for scraping parliamentary CORRECTED debates and downloading PDFs
+    
+    Note: This service handles CORRECTED debates (text-of-debate API).
+    For UNCORRECTED debates, use UncorrectedDebateScraperService.
     """
     
     def __init__(self, scraping_job: ScrapingJob = None):
@@ -40,13 +43,14 @@ class DebateScraperService:
         self.config = ScrapingConfig.get_default()
         self.gcs_service = GCSService()
         self.master_data_service = DebateMasterDataService()
+        self.debate_category = 'corrected'  # This service handles CORRECTED debates
         
-        # Set headers for API requests
+        # Set headers for API requests (corrected debates)
         self.session.headers.update({
             'Accept': 'application/json, text/plain, */*',
             'Accept-Language': 'en-US,en;q=0.9',
             'Connection': 'keep-alive',
-            'Referer': 'https://sansad.in/ls/debates/text-of-debates?tab=uncorrected',
+            'Referer': 'https://sansad.in/ls/debates/text-of-debates',  # No tab parameter = corrected
             'Sec-Fetch-Dest': 'empty',
             'Sec-Fetch-Mode': 'cors',
             'Sec-Fetch-Site': 'same-origin',
@@ -908,7 +912,7 @@ class DebateScraperService:
             }
     
     def _save_debate(self, lok_sabha: LokSabha, session: Session, date_str: str, debate_info: Dict) -> Tuple[Debate, bool]:
-        """Save or update debate record"""
+        """Save or update CORRECTED debate record"""
         
         # Parse date
         date_parts = date_str.split('/')
@@ -917,8 +921,8 @@ class DebateScraperService:
         # Extract PDF URL
         pdf_url = debate_info.get('pdf_url', '') or debate_info.get('url', '')
         
-        # Generate debate ID
-        debate_id = f"{lok_sabha.number}_{session.session_number}_{debate_date.strftime('%Y%m%d')}"
+        # Generate debate ID (include category to differentiate corrected/uncorrected)
+        debate_id = f"{lok_sabha.number}_{session.session_number}_{debate_date.strftime('%Y%m%d')}_corrected"
         
         # Create or update debate
         debate, created = Debate.objects.update_or_create(
@@ -927,6 +931,8 @@ class DebateScraperService:
                 'lok_sabha': lok_sabha,
                 'session': session,
                 'debate_date': debate_date,
+                'debate_category': 'corrected',  # Explicitly mark as CORRECTED
+                'debate_type': 'text_of_debate',
                 'pdf_url': pdf_url,
                 'raw_api_data': debate_info,
                 'last_scraped': timezone.now(),
@@ -937,7 +943,14 @@ class DebateScraperService:
         return debate, created
     
     def _queue_pdf_download(self, debate: Debate):
-        """Queue PDF for download and process immediately"""
+        """
+        Queue PDF for ASYNC download via Celery - NO BLOCKING!
+        
+        This method now:
+        1. Creates DocumentFile record for tracking
+        2. Dispatches Celery task for PARALLEL download
+        3. Returns IMMEDIATELY without waiting
+        """
         
         # Create document file record
         doc_file, created = DocumentFile.objects.get_or_create(
@@ -961,23 +974,20 @@ class DebateScraperService:
             priority=5
         )
         
-        logger.info(f"Queued PDF download for debate {debate.debate_id}")
+        logger.info(f"Dispatching async PDF download for debate {debate.debate_id}")
         
-        # Immediately process the download with GCS integration
+        # Dispatch to Celery worker - ASYNC, NO BLOCKING!
         try:
-            queue_entry.mark_started('debate_scraper_service')
-            success = self.download_debate_pdf(debate)
+            from services.files.tasks import download_pdf_unified_task
             
-            if success:
-                queue_entry.mark_completed()
-                logger.info(f"Successfully processed PDF download for debate {debate.debate_id}")
-            else:
-                queue_entry.mark_failed("Download failed")
-                logger.error(f"Failed to process PDF download for debate {debate.debate_id}")
-                
+            # Dispatch async download task
+            task = download_pdf_unified_task.delay('debate', debate.id)
+            
+            logger.info(f"✅ PDF download task dispatched for debate {debate.debate_id} (task: {task.id})")
+            
         except Exception as e:
             queue_entry.mark_failed(str(e))
-            logger.error(f"Error processing PDF download for debate {debate.debate_id}: {e}")
+            logger.error(f"Error dispatching PDF download for debate {debate.debate_id}: {e}")
             raise
     
     def download_debate_pdf(self, debate: Debate) -> bool:
@@ -1214,3 +1224,373 @@ class DebateScraperService:
             'total_size_mb': round(total_size / (1024 * 1024), 2),
             'average_size_mb': round((total_size / max(downloaded_debates, 1)) / (1024 * 1024), 2)
         }
+
+
+class UncorrectedDebateScraperService:
+    """
+    Service for scraping parliamentary UNCORRECTED debates and downloading PDFs
+    
+    Note: This service handles UNCORRECTED debates which have a different API structure:
+    - Uses /api_ls/debate/uncorrected-session-dates to get available dates
+    - Uses /api_ls/debate/uncorrected-debate-pdfs to get PDF files for each date
+    """
+    
+    def __init__(self, scraping_job: ScrapingJob = None):
+        self.scraping_job = scraping_job
+        self.base_url = "https://sansad.in/api_ls"
+        self.session = requests.Session()
+        self.config = ScrapingConfig.get_default()
+        self.gcs_service = GCSService()
+        self.debate_category = 'uncorrected'  # This service handles UNCORRECTED debates
+        
+        # Set headers for API requests (uncorrected debates)
+        self.session.headers.update({
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Connection': 'keep-alive',
+            'Referer': 'https://sansad.in/ls/debates/text-of-debates?tab=uncorrected',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin',
+            'Sec-GPC': '1',
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
+            'sec-ch-ua': '"Chromium";v="140", "Not=A?Brand";v="24", "Brave";v="140"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"macOS"'
+        })
+    
+    def fetch_uncorrected_session_dates(self, loksabha_no: str, session_no: str, locale: str = "en") -> Dict:
+        """
+        Fetch dates that have uncorrected debates for a specific session
+        
+        Args:
+            loksabha_no: Lok Sabha number (e.g., "18")
+            session_no: Session number (e.g., "5")
+            locale: Language locale (default: "en")
+            
+        Returns:
+            Dict with available dates and metadata
+        """
+        try:
+            url = f"{self.base_url}/debate/uncorrected-session-dates"
+            params = {
+                'lsno': loksabha_no,
+                'sessionNo': session_no,
+                'locale': locale
+            }
+            
+            logger.info(f"Fetching uncorrected debate dates for LS{loksabha_no} Session {session_no}")
+            response = self.session.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            # The API returns a list of date strings
+            if isinstance(data, list):
+                dates = data
+            elif isinstance(data, dict) and 'dates' in data:
+                dates = data['dates']
+            else:
+                logger.warning(f"Unexpected response format: {data}")
+                dates = []
+            
+            logger.info(f"Found {len(dates)} dates with uncorrected debates for LS{loksabha_no} Session{session_no}")
+            
+            return {
+                'status': 'SUCCESS',
+                'loksabha_no': loksabha_no,
+                'session_no': session_no,
+                'dates': dates,
+                'dates_count': len(dates),
+                'raw_response': data
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch uncorrected session dates for LS{loksabha_no} Session{session_no}: {e}")
+            return {
+                'status': 'ERROR',
+                'loksabha_no': loksabha_no,
+                'session_no': session_no,
+                'dates': [],
+                'dates_count': 0,
+                'error': str(e)
+            }
+    
+    def fetch_uncorrected_debate_pdfs(self, loksabha_no: str, session_no: str, debate_date: str, locale: str = "en") -> Dict:
+        """
+        Fetch PDF files available for a specific uncorrected debate date
+        
+        Args:
+            loksabha_no: Lok Sabha number (e.g., "18")
+            session_no: Session number (e.g., "5")
+            debate_date: Date in DD/MM/YYYY format (e.g., "21/08/2025")
+            locale: Language locale (default: "en")
+            
+        Returns:
+            Dict with PDF file URLs and metadata
+        """
+        try:
+            url = f"{self.base_url}/debate/uncorrected-debate-pdfs"
+            params = {
+                'lsno': loksabha_no,
+                'sessionNo': session_no,
+                'debateDate': debate_date,
+                'locale': locale
+            }
+            
+            logger.info(f"Fetching uncorrected debate PDFs for LS{loksabha_no} Session {session_no} Date {debate_date}")
+            response = self.session.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            # Extract PDF URLs from response
+            # API returns: [{"fileName":"...", "fileType":"pdf", "fileUrl":"..."}]
+            pdf_files = []
+            if isinstance(data, list):
+                # Extract fileUrl from each object
+                for item in data:
+                    if isinstance(item, dict):
+                        url = item.get('fileUrl') or item.get('url') or item.get('pdfUrl')
+                        if url:
+                            pdf_files.append({
+                                'url': url,
+                                'fileName': item.get('fileName', ''),
+                                'fileType': item.get('fileType', 'pdf')
+                            })
+                    elif isinstance(item, str):
+                        # Sometimes might be a direct URL string
+                        pdf_files.append({'url': item, 'fileName': '', 'fileType': 'pdf'})
+            elif isinstance(data, dict):
+                # Single file response
+                url = data.get('fileUrl') or data.get('url') or data.get('pdfUrl')
+                if url:
+                    pdf_files = [{
+                        'url': url,
+                        'fileName': data.get('fileName', ''),
+                        'fileType': data.get('fileType', 'pdf')
+                    }]
+            
+            logger.info(f"Found {len(pdf_files)} PDF files for LS{loksabha_no} Session{session_no} Date{debate_date}")
+            
+            return {
+                'status': 'SUCCESS',
+                'loksabha_no': loksabha_no,
+                'session_no': session_no,
+                'debate_date': debate_date,
+                'pdf_files': pdf_files,
+                'files_count': len(pdf_files),
+                'raw_response': data
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch uncorrected debate PDFs for LS{loksabha_no} Session{session_no} Date{debate_date}: {e}")
+            return {
+                'status': 'ERROR',
+                'loksabha_no': loksabha_no,
+                'session_no': session_no,
+                'debate_date': debate_date,
+                'pdf_files': [],
+                'files_count': 0,
+                'error': str(e)
+            }
+    
+    def scrape_uncorrected_debates(self, loksabha_no: str, session_no: str, download_pdfs: bool = True) -> Dict:
+        """
+        Complete flow to scrape uncorrected debates for a session
+        
+        Args:
+            loksabha_no: Lok Sabha number (e.g., "18")
+            session_no: Session number (e.g., "5")
+            download_pdfs: Whether to download PDFs (default: True)
+            
+        Returns:
+            Dict with scraping results and statistics
+        """
+        try:
+            logger.info(f"Starting uncorrected debates scraping for LS{loksabha_no} Session{session_no}")
+            
+            # Get or create LokSabha and Session objects
+            lok_sabha, _ = LokSabha.objects.get_or_create(
+                number=loksabha_no,
+                defaults={'is_current': loksabha_no == "18"}
+            )
+            
+            session, _ = Session.objects.get_or_create(
+                lok_sabha=lok_sabha,
+                session_number=session_no
+            )
+            
+            # Step 1: Get all dates with uncorrected debates
+            dates_result = self.fetch_uncorrected_session_dates(loksabha_no, session_no)
+            
+            if dates_result['status'] != 'SUCCESS' or not dates_result['dates']:
+                logger.warning(f"No uncorrected debate dates found for LS{loksabha_no} Session{session_no}")
+                return {
+                    'status': 'NO_DATA',
+                    'loksabha_no': loksabha_no,
+                    'session_no': session_no,
+                    'dates_processed': 0,
+                    'debates_created': 0,
+                    'message': 'No uncorrected debate dates available'
+                }
+            
+            available_dates = dates_result['dates']
+            logger.info(f"Processing {len(available_dates)} dates with uncorrected debates")
+            
+            # Step 2: For each date, get PDF files and save debates
+            debates_created = 0
+            debates_updated = 0
+            debates_failed = 0
+            total_files = 0
+            
+            for date_str in available_dates:
+                try:
+                    # Get PDF files for this date
+                    pdfs_result = self.fetch_uncorrected_debate_pdfs(loksabha_no, session_no, date_str)
+                    
+                    if pdfs_result['status'] != 'SUCCESS' or not pdfs_result['pdf_files']:
+                        logger.warning(f"No PDF files found for date {date_str}")
+                        debates_failed += 1
+                        continue
+                    
+                    pdf_files = pdfs_result['pdf_files']
+                    total_files += len(pdf_files)
+                    
+                    # Save debate records for each PDF file
+                    for idx, pdf_file_obj in enumerate(pdf_files):
+                        # Extract URL from the file object
+                        pdf_url = pdf_file_obj['url'] if isinstance(pdf_file_obj, dict) else pdf_file_obj
+                        file_name = pdf_file_obj.get('fileName', '') if isinstance(pdf_file_obj, dict) else ''
+                        
+                        debate_info = {
+                            'pdf_url': pdf_url,
+                            'file_name': file_name,
+                            'file_index': idx,
+                            'total_files': len(pdf_files),
+                            'api_response': pdfs_result['raw_response']
+                        }
+                        
+                        debate, created = self._save_uncorrected_debate(
+                            lok_sabha, session, date_str, debate_info, file_index=idx
+                        )
+                        
+                        if created:
+                            debates_created += 1
+                        else:
+                            debates_updated += 1
+                        
+                        # Queue PDF download if enabled
+                        if download_pdfs and debate.pdf_url and not debate.is_downloaded:
+                            self._queue_pdf_download(debate)
+                    
+                    # Small delay between dates
+                    time.sleep(0.3)
+                    
+                except Exception as e:
+                    logger.error(f"Error processing uncorrected debate for date {date_str}: {e}")
+                    debates_failed += 1
+            
+            result = {
+                'status': 'SUCCESS',
+                'loksabha_no': loksabha_no,
+                'session_no': session_no,
+                'dates_processed': len(available_dates),
+                'debates_created': debates_created,
+                'debates_updated': debates_updated,
+                'debates_failed': debates_failed,
+                'total_pdf_files': total_files,
+                'message': f'Processed {len(available_dates)} dates, created {debates_created} debates, {total_files} PDF files'
+            }
+            
+            logger.info(f"Uncorrected debates scraping completed: {result}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to scrape uncorrected debates for LS{loksabha_no} Session{session_no}: {e}")
+            return {
+                'status': 'ERROR',
+                'loksabha_no': loksabha_no,
+                'session_no': session_no,
+                'error': str(e)
+            }
+    
+    def _save_uncorrected_debate(self, lok_sabha: LokSabha, session: Session, date_str: str, 
+                                debate_info: Dict, file_index: int = 0) -> Tuple[Debate, bool]:
+        """Save or update UNCORRECTED debate record"""
+        
+        # Parse date
+        date_parts = date_str.split('/')
+        debate_date = datetime(int(date_parts[2]), int(date_parts[1]), int(date_parts[0])).date()
+        
+        # Extract PDF URL
+        pdf_url = debate_info.get('pdf_url', '') or debate_info.get('url', '')
+        
+        # Generate debate ID (include category and file index for multiple files per date)
+        debate_id = f"{lok_sabha.number}_{session.session_number}_{debate_date.strftime('%Y%m%d')}_uncorrected_{file_index}"
+        
+        # Create or update debate
+        debate, created = Debate.objects.update_or_create(
+            debate_id=debate_id,
+            defaults={
+                'lok_sabha': lok_sabha,
+                'session': session,
+                'debate_date': debate_date,
+                'debate_category': 'uncorrected',  # Explicitly mark as UNCORRECTED
+                'debate_type': 'uncorrected',
+                'pdf_url': pdf_url,
+                'raw_api_data': debate_info,
+                'last_scraped': timezone.now(),
+                'status': 'pending' if pdf_url else 'not_available'
+            }
+        )
+        
+        return debate, created
+    
+    def _queue_pdf_download(self, debate: Debate):
+        """
+        Queue PDF for ASYNC download via Celery - NO BLOCKING!
+        
+        This method now:
+        1. Creates DocumentFile record for tracking
+        2. Dispatches Celery task for PARALLEL download
+        3. Returns IMMEDIATELY without waiting
+        """
+        
+        # Create document file record
+        doc_file, created = DocumentFile.objects.get_or_create(
+            original_url=debate.pdf_url,
+            defaults={
+                'document_category': 'parl_debate_uncorrected',
+                'file_type': 'debate',
+                'file_name': debate.get_pdf_filename(),
+                'question': None,
+                'download_priority': 5
+            }
+        )
+        
+        # Link to debate
+        debate.pdf_file = doc_file
+        debate.save()
+        
+        # Create download queue entry for tracking
+        queue_entry = DownloadQueue.objects.create(
+            document_file=doc_file,
+            priority=5
+        )
+        
+        logger.info(f"Dispatching async PDF download for uncorrected debate {debate.debate_id}")
+        
+        # Dispatch to Celery worker - ASYNC, NO BLOCKING!
+        try:
+            from services.files.tasks import download_pdf_unified_task
+            
+            # Dispatch async download task
+            task = download_pdf_unified_task.delay('debate', debate.id)
+            
+            logger.info(f"✅ PDF download task dispatched for uncorrected debate {debate.debate_id} (task: {task.id})")
+            
+        except Exception as e:
+            queue_entry.mark_failed(str(e))
+            logger.error(f"Error dispatching PDF download for uncorrected debate {debate.debate_id}: {e}")
+            raise

@@ -116,84 +116,85 @@ def download_pdf_unified_task(self, document_type: str, document_id: int, pdf_ur
               retry_jitter=True)
 def bulk_download_pdfs_unified_task(self, downloads: list):
     """
-    Unified bulk PDF download task for any document type
+    Unified bulk PDF download task for any document type with TRUE PARALLELISM
+    
+    This task now:
+    1. Collects all download specifications (metadata phase)
+    2. Dispatches ALL downloads in parallel using celery.group()
+    3. Returns immediately without waiting for downloads to complete
     
     Args:
         downloads: List of dicts with keys: {'document_type': str, 'document_id': int, 'pdf_url': str (optional)}
     """
     try:
+        from celery import group
+        
         total_downloads = len(downloads)
-        successful = 0
-        failed = 0
-        errors = []
         
         # Update initial progress
         self.update_state(
             state='PROGRESS',
             meta={
-                'status': f'Starting bulk download of {total_downloads} documents',
-                'progress': 0,
+                'status': f'Preparing {total_downloads} documents for parallel download',
+                'progress': 10,
                 'total': total_downloads,
-                'successful': 0,
-                'failed': 0
+                'phase': 'preparing'
             }
         )
         
-        # Process downloads
+        logger.info(f"Starting parallel bulk download for {total_downloads} documents")
+        
+        # Build task signatures for all downloads
+        download_tasks = []
         for i, download_spec in enumerate(downloads):
             try:
-                # Update progress
-                progress = int((i / total_downloads) * 90)  # 0-90% range
-                self.update_state(
-                    state='PROGRESS',
-                    meta={
-                        'status': f'Processing download {i+1}/{total_downloads}',
-                        'progress': progress,
-                        'total': total_downloads,
-                        'successful': successful,
-                        'failed': failed,
-                        'current_document': download_spec
-                    }
+                # Create task signature for this download
+                download_tasks.append(
+                    download_pdf_unified_task.si(
+                        download_spec['document_type'],
+                        download_spec['document_id'],
+                        download_spec.get('pdf_url')
+                    )
                 )
-                
-                # Execute download task
-                result = download_pdf_unified_task.delay(
-                    download_spec['document_type'],
-                    download_spec['document_id'],
-                    download_spec.get('pdf_url')
-                ).get()
-                
-                if result['status'] == 'SUCCESS':
-                    successful += 1
-                else:
-                    failed += 1
-                    errors.append(f"{result.get('document_identifier', 'Unknown')}: {result.get('error', 'Unknown error')}")
-            
             except Exception as e:
-                failed += 1
-                error_msg = f"Download {i+1}: {str(e)}"
-                errors.append(error_msg)
-                logger.error(error_msg)
+                logger.error(f"Error preparing download {i+1}: {str(e)}")
+                continue
         
-        # Final progress update
+        if not download_tasks:
+            return {
+                'status': 'FAILED',
+                'error': 'No valid downloads to process'
+            }
+        
+        # Update progress
+        tasks_to_dispatch = len(download_tasks)
         self.update_state(
             state='PROGRESS',
             meta={
-                'status': 'Bulk download completed',
-                'progress': 100,
+                'status': f'Dispatching {tasks_to_dispatch} downloads in parallel',
+                'progress': 50,
                 'total': total_downloads,
-                'successful': successful,
-                'failed': failed
+                'tasks_to_dispatch': tasks_to_dispatch,
+                'phase': 'dispatching'
             }
         )
         
+        # Dispatch ALL downloads in parallel using group()
+        job = group(download_tasks)
+        group_result = job.apply_async()
+        
+        logger.info(f"✅ PARALLEL DISPATCH: {tasks_to_dispatch} PDF downloads dispatched simultaneously!")
+        logger.info(f"   Group ID: {group_result.id}")
+        logger.info(f"   Worker pool will process these {tasks_to_dispatch} tasks in parallel")
+        
+        # Return immediately - don't wait!
         return {
-            'status': 'SUCCESS',
+            'status': 'DISPATCHED',
+            'message': 'All downloads dispatched in parallel - check Celery Flower for progress',
             'total_downloads': total_downloads,
-            'successful': successful,
-            'failed': failed,
-            'errors': errors,
-            'success_rate': (successful / total_downloads * 100) if total_downloads > 0 else 0
+            'tasks_dispatched': tasks_to_dispatch,
+            'group_id': group_result.id,
+            'note': 'Downloads are running in parallel. Use group_id to track progress.'
         }
     
     except Exception as e:

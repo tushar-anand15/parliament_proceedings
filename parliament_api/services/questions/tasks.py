@@ -100,54 +100,57 @@ def download_question_pdf_task(self, question_id: int, pdf_url: str = None):
               retry_jitter=True)
 def bulk_download_question_pdfs_task(self, question_ids: list, max_concurrent: int = 5):
     """
-    Celery task for downloading multiple question PDFs with concurrency control
+    Celery task for downloading multiple question PDFs with TRUE PARALLELISM
+    
+    This task now:
+    1. Collects all questions that need downloading (metadata phase)
+    2. Dispatches ALL downloads in parallel using celery.group()
+    3. Returns immediately without waiting for downloads to complete
     
     Args:
         question_ids: List of Question IDs to download PDFs for
-        max_concurrent: Maximum number of concurrent downloads
+        max_concurrent: Maximum number of concurrent downloads (note: actual concurrency controlled by worker pool)
     """
     try:
+        from celery import group
+        
         total_questions = len(question_ids)
-        downloaded = 0
-        failed = 0
         skipped = 0
-        errors = []
+        download_tasks = []
         
         # Update initial progress
         self.update_state(
             state='PROGRESS',
             meta={
-                'status': f'Starting bulk download of {total_questions} questions',
-                'progress': 0,
+                'status': f'Preparing {total_questions} questions for parallel download',
+                'progress': 10,
                 'total': total_questions,
-                'downloaded': 0,
-                'failed': 0,
-                'skipped': 0
+                'phase': 'metadata_collection'
             }
         )
         
-        # Process questions in batches
+        logger.info(f"Starting parallel bulk download for {total_questions} questions")
+        
+        # PHASE 1: Collect all questions that need downloading (fast metadata check)
         for i, question_id in enumerate(question_ids):
             try:
                 # Update progress
-                progress = int((i / total_questions) * 90)  # 0-90% range
-                self.update_state(
-                    state='PROGRESS',
-                    meta={
-                        'status': f'Processing question {i+1}/{total_questions}',
-                        'progress': progress,
-                        'total': total_questions,
-                        'downloaded': downloaded,
-                        'failed': failed,
-                        'skipped': skipped,
-                        'current_question': question_id
-                    }
-                )
+                if i % 10 == 0:  # Update every 10 items to reduce overhead
+                    progress = 10 + int((i / total_questions) * 40)  # 10-50% range
+                    self.update_state(
+                        state='PROGRESS',
+                        meta={
+                            'status': f'Checking question {i+1}/{total_questions}',
+                            'progress': progress,
+                            'total': total_questions,
+                            'phase': 'metadata_collection'
+                        }
+                    )
                 
                 # Get question
                 question = Question.objects.get(id=question_id)
                 
-                # Check if already downloaded
+                # Check if has PDF URL
                 pdf_urls = question.pdf_files if isinstance(question.pdf_files, list) else []
                 if not pdf_urls:
                     skipped += 1
@@ -166,46 +169,61 @@ def bulk_download_question_pdfs_task(self, question_ids: list, max_concurrent: i
                     skipped += 1
                     continue
                 
-                # Download PDF
-                success = download_question_pdf_task.delay(question_id, pdf_url).get()
-                
-                if success['status'] == 'SUCCESS':
-                    downloaded += 1
-                else:
-                    failed += 1
-                    errors.append(f"Q.{question.question_number}: {success.get('error', 'Unknown error')}")
+                # Add to download list
+                download_tasks.append(
+                    download_question_pdf_task.si(question_id, pdf_url)
+                )
             
             except Question.DoesNotExist:
-                failed += 1
-                errors.append(f"Question {question_id}: Not found")
+                skipped += 1
+                logger.warning(f"Question {question_id}: Not found")
             except Exception as e:
-                failed += 1
-                error_msg = f"Question {question_id}: {str(e)}"
-                errors.append(error_msg)
-                logger.error(error_msg)
+                skipped += 1
+                logger.error(f"Error preparing question {question_id}: {str(e)}")
         
-        # Final progress update
+        # PHASE 2: Dispatch ALL downloads in parallel
+        tasks_to_dispatch = len(download_tasks)
+        
         self.update_state(
             state='PROGRESS',
             meta={
-                'status': 'Bulk download completed',
-                'progress': 100,
+                'status': f'Dispatching {tasks_to_dispatch} downloads in parallel',
+                'progress': 60,
                 'total': total_questions,
-                'downloaded': downloaded,
-                'failed': failed,
-                'skipped': skipped
+                'tasks_to_dispatch': tasks_to_dispatch,
+                'skipped': skipped,
+                'phase': 'dispatching'
             }
         )
         
-        return {
-            'status': 'SUCCESS',
-            'total_questions': total_questions,
-            'downloaded': downloaded,
-            'failed': failed,
-            'skipped': skipped,
-            'errors': errors,
-            'success_rate': (downloaded / total_questions * 100) if total_questions > 0 else 0
-        }
+        if download_tasks:
+            # Use group() for TRUE PARALLELISM - all tasks dispatched at once
+            job = group(download_tasks)
+            group_result = job.apply_async()
+            
+            logger.info(f"✅ PARALLEL DISPATCH: {tasks_to_dispatch} PDF downloads dispatched simultaneously!")
+            logger.info(f"   Group ID: {group_result.id}")
+            logger.info(f"   Worker pool will process these {tasks_to_dispatch} tasks in parallel")
+            
+            # Return immediately - don't wait!
+            return {
+                'status': 'DISPATCHED',
+                'message': 'All downloads dispatched in parallel - check Celery Flower for progress',
+                'total_questions': total_questions,
+                'tasks_dispatched': tasks_to_dispatch,
+                'skipped': skipped,
+                'group_id': group_result.id,
+                'note': 'Downloads are running in parallel. Use group_id to track progress.'
+            }
+        else:
+            logger.info(f"No downloads needed - all {skipped} questions skipped")
+            return {
+                'status': 'SUCCESS',
+                'total_questions': total_questions,
+                'tasks_dispatched': 0,
+                'skipped': skipped,
+                'message': 'No downloads needed - all questions already downloaded or have no PDFs'
+            }
     
     except Exception as e:
         logger.error(f"Bulk question PDF download task failed: {str(e)}")
@@ -545,7 +563,7 @@ def scrape_rs_questions_task(self,
             questions_with_pdfs = QuestionMasterData.objects.filter(
                 parent_institution=rs_institution,
                 session_number=session_no,
-                is_processed=False  # Only process unprocessed questions
+                pdf_downloaded=False  # FIXED: Only download questions without PDFs in GCS
             ).exclude(questions_file_path='')
             
             logger.info(f"Found {questions_with_pdfs.count()} RS questions with PDFs to download")
@@ -679,77 +697,92 @@ def download_rs_question_pdf_task(self, master_data_id: int, pdf_url: str = None
               retry_jitter=True)
 def bulk_download_rs_question_pdfs_task(self, master_data_ids: list):
     """
-    Celery task for downloading multiple RS question PDFs
+    Celery task for downloading multiple RS question PDFs with TRUE PARALLELISM
     
     Args:
         master_data_ids: List of QuestionMasterData IDs to download PDFs for
     """
     try:
+        from celery import group
+        from services.files.tasks import download_pdf_unified_task
+        
         total_questions = len(master_data_ids)
         
         # Update initial progress
         self.update_state(
             state='PROGRESS',
             meta={
-                'status': f'Starting bulk download of {total_questions} RS questions',
-                'progress': 0,
-                'total': total_questions
+                'status': f'Preparing {total_questions} RS questions for parallel download',
+                'progress': 10,
+                'total': total_questions,
+                'phase': 'metadata_collection'
             }
         )
         
-        # Prepare download specifications for unified bulk task
-        download_specs = []
+        logger.info(f"Starting parallel bulk download for {total_questions} RS questions")
+        
+        # Prepare download tasks for parallel dispatch
+        download_tasks = []
+        skipped = 0
+        
         for master_data_id in master_data_ids:
             try:
                 master_data = QuestionMasterData.objects.get(id=master_data_id)
                 pdf_url = master_data.get_pdf_url()
                 
                 if pdf_url:
-                    download_specs.append({
-                        'document_type': 'rs_question',
-                        'document_id': master_data_id,
-                        'pdf_url': pdf_url
-                    })
+                    # Create task signature for this download
+                    download_tasks.append(
+                        download_pdf_unified_task.si('rs_question', master_data_id, pdf_url)
+                    )
+                else:
+                    skipped += 1
             except QuestionMasterData.DoesNotExist:
                 logger.warning(f"RS QuestionMasterData {master_data_id} not found")
+                skipped += 1
                 continue
         
-        if not download_specs:
+        if not download_tasks:
             return {
-                'status': 'FAILED',
-                'error': 'No valid RS questions found for download'
+                'status': 'SUCCESS',
+                'message': 'No RS questions with PDFs found to download',
+                'total_questions': total_questions,
+                'tasks_dispatched': 0,
+                'skipped': skipped
             }
         
         # Update progress
+        tasks_to_dispatch = len(download_tasks)
         self.update_state(
             state='PROGRESS',
             meta={
-                'status': f'Executing bulk download of {len(download_specs)} RS question PDFs...',
-                'progress': 25
+                'status': f'Dispatching {tasks_to_dispatch} RS question downloads in parallel',
+                'progress': 50,
+                'total': total_questions,
+                'tasks_to_dispatch': tasks_to_dispatch,
+                'skipped': skipped,
+                'phase': 'dispatching'
             }
         )
         
-        # Execute unified bulk download
-        from services.files.tasks import bulk_download_pdfs_unified_task
-        bulk_result = bulk_download_pdfs_unified_task.delay(download_specs).get()
+        # Execute parallel bulk download using group()
+        job = group(download_tasks)
+        group_result = job.apply_async()
         
-        # Final progress update
-        self.update_state(
-            state='PROGRESS',
-            meta={
-                'status': 'RS bulk download completed',
-                'progress': 100,
-                'results': bulk_result
-            }
-        )
+        logger.info(f"✅ PARALLEL DISPATCH: {tasks_to_dispatch} RS question PDF downloads dispatched simultaneously!")
+        logger.info(f"   Group ID: {group_result.id}")
+        logger.info(f"   Worker pool will process these {tasks_to_dispatch} tasks in parallel")
         
+        # Return immediately - don't wait!
         return {
-            'status': 'SUCCESS',
+            'status': 'DISPATCHED',
+            'message': 'All RS question downloads dispatched in parallel - check Celery Flower for progress',
             'institution': 'rajya_sabha',
             'total_questions': total_questions,
-            'download_specs_created': len(download_specs),
-            'bulk_result': bulk_result,
-            'message': f'Bulk download completed for {total_questions} RS questions'
+            'tasks_dispatched': tasks_to_dispatch,
+            'skipped': skipped,
+            'group_id': group_result.id,
+            'note': 'RS question downloads are running in parallel. Use group_id to track progress.'
         }
         
     except Exception as e:

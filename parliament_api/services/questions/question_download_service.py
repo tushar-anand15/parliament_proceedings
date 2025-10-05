@@ -505,8 +505,10 @@ class QuestionDownloadService:
         # Master data statistics
         stats['master_data'] = {
             'total_master_records': QuestionMasterData.objects.count(),
-            'processed': QuestionMasterData.objects.filter(is_processed=True).count(),
-            'unprocessed': QuestionMasterData.objects.filter(is_processed=False).count(),
+            'metadata_processed': QuestionMasterData.objects.filter(is_processed=True).count(),
+            'metadata_unprocessed': QuestionMasterData.objects.filter(is_processed=False).count(),
+            'pdfs_downloaded': QuestionMasterData.objects.filter(pdf_downloaded=True).count(),
+            'pdfs_pending': QuestionMasterData.objects.filter(pdf_downloaded=False).exclude(questions_file_path='').count(),
             'with_pdf_urls': QuestionMasterData.objects.exclude(questions_file_path='').count()
         }
         

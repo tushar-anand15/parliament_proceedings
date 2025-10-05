@@ -1,8 +1,10 @@
 import requests
 import logging
 import time
+import random
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from django.utils import timezone
 from django.db import transaction
 from django.conf import settings
@@ -15,23 +17,26 @@ logger = logging.getLogger(__name__)
 
 class DebateMasterDataService:
     """
-    Service for fetching and managing master debate metadata from Parliament APIs
+    Service for fetching and managing CORRECTED debate metadata from Parliament APIs
+    
+    Note: This service handles CORRECTED debates (text-of-debate API).
+    For UNCORRECTED debates, the API structure is different.
     
     This service handles the complete flow:
     1. Fetch Lok Sabha and Sessions metadata
-    2. Fetch available debate dates for each session
+    2. Fetch available debate dates for each session (corrected debates)
     3. Store master data in database
     4. Provide data for debate scraper service
     """
     
     def __init__(self):
         self.session = requests.Session()
-        # Set headers to mimic browser requests
+        # Set headers to mimic browser requests (corrected debates)
         self.session.headers.update({
             'Accept': 'application/json, text/plain, */*',
             'Accept-Language': 'en-US,en;q=0.9',
             'Connection': 'keep-alive',
-            'Referer': 'https://sansad.in/ls/debates/text-of-debates',
+            'Referer': 'https://sansad.in/ls/debates/text-of-debates',  # No tab parameter = corrected
             'Sec-Fetch-Dest': 'empty',
             'Sec-Fetch-Mode': 'cors',
             'Sec-Fetch-Site': 'same-origin',
@@ -43,6 +48,7 @@ class DebateMasterDataService:
         
         self.base_url = "https://sansad.in/api_ls"
         self.eparlib_base_url = "https://eparlib.sansad.in/restv3"
+        self.debate_category = 'corrected'  # This service handles CORRECTED debates
     
     def initialize_debate_master_data(self, force_update: bool = False) -> Dict:
         """
@@ -110,50 +116,57 @@ class DebateMasterDataService:
             logger.error(f"Failed to initialize debate master data: {e}")
             raise
     
-    def fetch_debate_dates_for_all_sessions(self) -> Dict:
+    def fetch_debate_dates_for_all_sessions(self, workers: int = 10) -> Dict:
         """
-        Fetch debate dates for ALL sessions in the database
+        Fetch debate dates for ALL sessions in the database using parallel processing
         
+        Args:
+            workers: Number of parallel workers (default: 10)
+            
         Returns:
             Dict with overall statistics
         """
         try:
             # Get all sessions from database
-            all_sessions = Session.objects.all().order_by('lok_sabha__number', 'session_number')
+            all_sessions = list(Session.objects.all().order_by('lok_sabha__number', 'session_number'))
             
-            total_sessions = all_sessions.count()
+            total_sessions = len(all_sessions)
             processed_sessions = 0
             total_created = 0
             total_updated = 0
             errors = []
             
-            print(f"📊 Processing {total_sessions} sessions for debate dates...")
+            print(f"📊 Processing {total_sessions} sessions for corrected debate dates with {workers} parallel workers...")
             
-            # Process sessions in batches to avoid overwhelming the API
-            batch_size = 3  # Smaller batch size for debates as they involve more complex API calls
-            current_batch = []
-            
-            for session in all_sessions:
-                current_batch.append(session)
+            # Process sessions in parallel
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                # Submit all sessions for processing
+                future_to_session = {}
+                for session in all_sessions:
+                    future = executor.submit(self._process_single_session, session)
+                    future_to_session[future] = session
                 
-                if len(current_batch) >= batch_size:
-                    batch_result = self._process_debate_session_batch(current_batch)
-                    processed_sessions += batch_result['processed']
-                    total_created += batch_result['created']
-                    total_updated += batch_result['updated']
-                    errors.extend(batch_result['errors'])
-                    current_batch = []
+                # Collect results as they complete
+                completed = 0
+                for future in as_completed(future_to_session):
+                    session = future_to_session[future]
+                    completed += 1
                     
-                    # Brief pause between batches to be respectful to the API
-                    time.sleep(3)
-            
-            # Process remaining sessions
-            if current_batch:
-                batch_result = self._process_debate_session_batch(current_batch)
-                processed_sessions += batch_result['processed']
-                total_created += batch_result['created']
-                total_updated += batch_result['updated']
-                errors.extend(batch_result['errors'])
+                    try:
+                        result = future.result(timeout=120)
+                        processed_sessions += 1
+                        if result.get('created'):
+                            total_created += 1
+                        else:
+                            total_updated += 1
+                        
+                        dates_count = result.get('dates_count', 0)
+                        print(f"✅ ({completed}/{total_sessions}) LS{session.lok_sabha.number} Session{session.session_number}: {dates_count} dates")
+                        
+                    except Exception as e:
+                        error_msg = f"LS{session.lok_sabha.number} Session{session.session_number}: {str(e)}"
+                        errors.append(error_msg)
+                        print(f"❌ ({completed}/{total_sessions}) {error_msg}")
             
             result = {
                 'status': 'SUCCESS' if not errors else 'PARTIAL_SUCCESS',
@@ -162,51 +175,47 @@ class DebateMasterDataService:
                 'total_created': total_created,
                 'total_updated': total_updated,
                 'errors': errors,
-                'message': f'Debate dates fetch completed: {processed_sessions}/{total_sessions} sessions processed'
+                'message': f'Corrected debate dates fetch completed: {processed_sessions}/{total_sessions} sessions processed'
             }
             
-            logger.info(f"All debate dates fetch completed: {result}")
+            logger.info(f"All corrected debate dates fetch completed: {result}")
             return result
             
         except Exception as e:
             logger.error(f"Failed to fetch all debate dates: {e}")
             raise
     
-    def _process_debate_session_batch(self, sessions: List[Session]) -> Dict:
+    def _process_single_session(self, session: Session, max_retries: int = 3) -> Dict:
         """
-        Process a batch of sessions for debate dates
+        Process a single session with retry logic and randomized delay
+        Called by parallel workers
         """
-        batch_result = {
-            'processed': 0,
-            'created': 0,
-            'updated': 0,
-            'errors': []
-        }
-        
-        for session in sessions:
+        for attempt in range(max_retries):
             try:
-                print(f"   Processing LS{session.lok_sabha.number} Session{session.session_number} for debate dates...")
+                # Add randomized delay (0.2-0.5 seconds) to avoid overwhelming API
+                if attempt == 0:
+                    random_delay = random.uniform(0.2, 0.5)
+                    time.sleep(random_delay)
+                elif attempt > 0:
+                    # Exponential backoff on retries
+                    delay = min(2 ** attempt, 60)
+                    time.sleep(delay)
+                    logger.info(f"Retry {attempt + 1}/{max_retries} for LS{session.lok_sabha.number} Session{session.session_number}")
+                
                 result = self.fetch_debate_dates_for_session(
                     session.lok_sabha.number,
                     session.session_number
                 )
-                
-                batch_result['processed'] += 1
-                if result.get('created'):
-                    batch_result['created'] += 1
-                else:
-                    batch_result['updated'] += 1
-                
-                dates_count = result.get('dates_count', 0)
-                print(f"      ✅ {dates_count} debate dates found")
+                return result
                 
             except Exception as e:
-                error_msg = f"LS{session.lok_sabha.number} Session{session.session_number}: {str(e)}"
-                batch_result['errors'].append(error_msg)
-                logger.error(f"Failed to process debate session: {error_msg}")
-                print(f"      ❌ {error_msg}")
-        
-        return batch_result
+                logger.warning(f"Attempt {attempt + 1}/{max_retries} failed for LS{session.lok_sabha.number} Session{session.session_number}: {e}")
+                
+                if attempt == max_retries - 1:
+                    logger.error(f"All {max_retries} attempts failed for LS{session.lok_sabha.number} Session{session.session_number}: {e}")
+                    raise
+                
+                continue
     
     def fetch_debate_dates_for_session(self, lok_sabha_number: str, session_number: str) -> Dict:
         """

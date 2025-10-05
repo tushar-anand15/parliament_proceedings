@@ -232,17 +232,18 @@ def scrape_debates_task(self,
                 logger.error(error_msg)
                 errors.append(error_msg)
         
-        # Download pending PDFs if requested
-        pdfs_downloaded = 0
+        # Download pending PDFs if requested - PARALLEL DISPATCH
+        pdfs_dispatched = 0
         if download_pdfs:
             self.update_state(
                 state='PROGRESS',
                 meta={
-                    'status': 'Downloading pending PDFs...',
+                    'status': 'Preparing parallel PDF downloads...',
                     'progress': 90,
                     'debates_created': debates_created,
                     'debates_updated': debates_updated,
-                    'errors': len(errors)
+                    'errors': len(errors),
+                    'phase': 'pdf_dispatch'
                 }
             )
             
@@ -254,17 +255,34 @@ def scrape_debates_task(self,
                 pdf_url__isnull=False
             ).exclude(pdf_url='')
             
-            logger.info(f"Found {pending_debates.count()} pending debates to download")
+            pending_count = pending_debates.count()
+            logger.info(f"Found {pending_count} pending debates for PARALLEL PDF download")
             
-            for debate in pending_debates:
-                try:
-                    logger.info(f"Queuing PDF download for {debate.debate_id}")
-                    scraper._queue_pdf_download(debate)
-                    pdfs_downloaded += 1
-                    logger.info(f"Successfully queued PDF for {debate.debate_id}")
-                except Exception as e:
-                    logger.error(f"Error queuing PDF for {debate.debate_id}: {e}")
-                    errors.append(f"PDF queue failed for {debate.debate_id}: {str(e)}")
+            if pending_count > 0:
+                # Collect all download tasks for parallel dispatch
+                from celery import group
+                from services.files.tasks import download_pdf_unified_task
+                
+                download_tasks = []
+                for debate in pending_debates:
+                    try:
+                        # Create task signature for this debate
+                        download_tasks.append(
+                            download_pdf_unified_task.si('debate', debate.id)
+                        )
+                    except Exception as e:
+                        logger.error(f"Error preparing download for {debate.debate_id}: {e}")
+                        errors.append(f"PDF prep failed for {debate.debate_id}: {str(e)}")
+                
+                # Dispatch ALL PDFs in parallel using group()
+                if download_tasks:
+                    job = group(download_tasks)
+                    group_result = job.apply_async()
+                    pdfs_dispatched = len(download_tasks)
+                    
+                    logger.info(f"✅ PARALLEL DISPATCH: {pdfs_dispatched} debate PDFs dispatched simultaneously!")
+                    logger.info(f"   Group ID: {group_result.id}")
+                    logger.info(f"   Worker pool will process these {pdfs_dispatched} debate PDFs in parallel")
         
         # Final progress update
         self.update_state(
@@ -274,7 +292,7 @@ def scrape_debates_task(self,
                 'progress': 95,
                 'debates_created': debates_created,
                 'debates_updated': debates_updated,
-                'pdfs_downloaded': pdfs_downloaded,
+                'pdfs_dispatched': pdfs_dispatched,
                 'errors': len(errors)
             }
         )
@@ -294,7 +312,8 @@ def scrape_debates_task(self,
             'debates_created': debates_created,
             'debates_updated': debates_updated,
             'total_debates': debates_created + debates_updated,
-            'pdfs_downloaded': pdfs_downloaded,
+            'pdfs_dispatched': pdfs_dispatched,
+            'note': f'{pdfs_dispatched} PDF downloads dispatched in parallel - check Celery Flower for progress',
             'errors': errors,
             'error_count': len(errors)
         }
@@ -439,3 +458,171 @@ def bulk_download_pdfs_task(self, debate_ids: list):
             'status': 'FAILED',
             'error': str(e)
         }
+
+
+# ==========================================
+# RS DEBATES TASKS
+# ==========================================
+
+@shared_task(bind=True, name='debates.scrape_rs_verbatim_debates',
+              autoretry_for=(Exception,),
+              retry_kwargs={'max_retries': 3, 'countdown': 60},
+              retry_backoff=True)
+def scrape_rs_verbatim_debates_task(self, session_no: int, download_pdfs: bool = True, limit_dates: int = None):
+    """
+    Celery task for scraping RS verbatim debates for a session
+    
+    Args:
+        session_no: RS session number (e.g., 268)
+        download_pdfs: Whether to download PDFs
+        limit_dates: Limit to first N dates (for testing)
+    """
+    try:
+        from .rs_debate_scraper_service import RSDebateScraperService
+        
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': f'Scraping RS verbatim debates for session {session_no}', 'progress': 0}
+        )
+        
+        logger.info(f"Starting RS verbatim debate scraping for session {session_no}")
+        
+        scraper = RSDebateScraperService()
+        result = scraper.scrape_verbatim_debates_for_session(
+            session_no=session_no,
+            download_pdfs=download_pdfs,
+            limit_dates=limit_dates
+        )
+        
+        logger.info(f"RS verbatim scraping completed: {result['debates_created']} created, {result['debates_updated']} updated")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"RS verbatim scraping failed: {e}")
+        raise
+
+
+@shared_task(bind=True, name='debates.scrape_rs_official_debates',
+              autoretry_for=(Exception,),
+              retry_kwargs={'max_retries': 3, 'countdown': 60},
+              retry_backoff=True)
+def scrape_rs_official_debates_task(self, session_no: int, download_pdfs: bool = True, batch_size: int = 50):
+    """
+    Celery task for scraping RS official debates (Q&A) for a session
+    
+    Args:
+        session_no: RS session number
+        download_pdfs: Whether to download PDFs
+        batch_size: Number of records per API call
+    """
+    try:
+        from .rs_debate_scraper_service import RSDebateScraperService
+        
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': f'Scraping RS official debates for session {session_no}', 'progress': 0}
+        )
+        
+        logger.info(f"Starting RS official debate scraping for session {session_no}")
+        
+        scraper = RSDebateScraperService()
+        result = scraper.scrape_official_debates_for_session(
+            session_no=session_no,
+            download_pdfs=download_pdfs,
+            batch_size=batch_size
+        )
+        
+        logger.info(f"RS official scraping completed: {result['debates_created']} created, {result['debates_updated']} updated")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"RS official scraping failed: {e}")
+        raise
+
+
+@shared_task(bind=True, name='debates.scrape_recent_rs_debates',
+              autoretry_for=(Exception,),
+              retry_kwargs={'max_retries': 2, 'countdown': 120},
+              retry_backoff=True)
+def scrape_recent_rs_debates_task(self, recent_sessions: int = 5, download_pdfs: bool = True):
+    """
+    Celery task for scraping recent RS debates (both verbatim and official)
+    
+    Args:
+        recent_sessions: Number of recent sessions to scrape
+        download_pdfs: Whether to download PDFs
+    """
+    try:
+        from .rs_debate_scraper_service import RSDebateScraperService
+        
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': f'Scraping recent RS debates ({recent_sessions} sessions)', 'progress': 0}
+        )
+        
+        logger.info(f"Starting recent RS debate scraping ({recent_sessions} sessions)")
+        
+        scraper = RSDebateScraperService()
+        result = scraper.scrape_recent_rs_debates(
+            recent_sessions=recent_sessions,
+            download_pdfs=download_pdfs
+        )
+        
+        # Aggregate results
+        total_created = sum(r['debates_created'] for r in result['verbatim_results']) + \
+                        sum(r['debates_created'] for r in result['official_results'])
+        total_updated = sum(r['debates_updated'] for r in result['verbatim_results']) + \
+                        sum(r['debates_updated'] for r in result['official_results'])
+        
+        logger.info(f"Recent RS scraping completed: {total_created} created, {total_updated} updated")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Recent RS scraping failed: {e}")
+        raise
+
+
+@shared_task(bind=True, name='debates.download_rs_debate_pdf',
+              autoretry_for=(Exception,),
+              retry_kwargs={'max_retries': 3, 'countdown': 30},
+              retry_backoff=True)
+def download_rs_debate_pdf_task(self, debate_id: str):
+    """
+    Celery task for downloading a single RS debate PDF
+    
+    Args:
+        debate_id: Debate UUID
+    """
+    try:
+        from .rs_debate_scraper_service import RSDebateScraperService
+        
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': f'Downloading RS debate {debate_id}', 'progress': 50}
+        )
+        
+        # Get debate
+        debate = Debate.objects.get(debate_id=debate_id)
+        
+        scraper = RSDebateScraperService()
+        result = scraper.download_debate_pdf(debate)
+        
+        if result['status'] == 'SUCCESS':
+            logger.info(f"RS debate PDF downloaded: {debate_id}")
+        else:
+            logger.error(f"RS debate PDF download failed: {debate_id} - {result.get('error')}")
+        
+        return result
+        
+    except Debate.DoesNotExist:
+        logger.error(f"Debate not found: {debate_id}")
+        return {
+            'status': 'ERROR',
+            'message': f'Debate {debate_id} not found'
+        }
+    except Exception as e:
+        logger.error(f"RS PDF download failed: {e}")
+        raise

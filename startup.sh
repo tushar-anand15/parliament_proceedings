@@ -375,15 +375,34 @@ start_services() {
     # Setup PostgreSQL database and user
     print_info "Setting up PostgreSQL database..."
     
-    # Load environment variables
+    # Load environment variables and export them
     if [ -f "../.env" ]; then
-        export $(grep -v '^#' ../.env | xargs)
+        set -a  # automatically export all variables
+        source ../.env
+        set +a  # stop auto-exporting
+        print_status "Environment variables loaded from .env"
     fi
     
     # Create database and user if they don't exist
     DB_NAME=${DB_NAME:-parliament_api}
     DB_USER=${DB_USER:-parliament_user}
     DB_PASSWORD=${DB_PASSWORD:-***REMOVED_SECRET***}
+    
+    # Check for RESET_DB flag
+    if [ -f ".reset_db_flag" ]; then
+        print_warning "Database reset requested..."
+        
+        # Drop database if it exists
+        if psql -lqt | cut -d \| -f 1 | grep -qw "$DB_NAME" 2>/dev/null; then
+            print_info "Dropping existing database: $DB_NAME"
+            psql postgres -c "DROP DATABASE IF EXISTS $DB_NAME;" 2>/dev/null || true
+            print_status "Database dropped"
+        fi
+        
+        # Remove reset flag
+        rm -f ".reset_db_flag"
+        print_status "Database reset flag cleared"
+    fi
     
     # Check if database exists, create if not
     if ! psql -lqt | cut -d \| -f 1 | grep -qw "$DB_NAME" 2>/dev/null; then
@@ -418,6 +437,232 @@ start_services() {
     
     show_progress 7 11 "Django setup completed"
     
+    # Setup Google Cloud Storage buckets
+    print_info "Setting up Google Cloud Storage buckets..."
+    
+    # The environment variables are already loaded and exported from above
+    # Now run Python with those variables
+    python -c "
+import sys
+import os
+import django
+from google.cloud import storage
+from google.api_core import exceptions as gcs_exceptions
+
+# Explicitly set Django settings module
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'parliament_api.settings')
+
+# Setup Django
+django.setup()
+
+try:
+    from django.conf import settings
+    
+    print(f'ℹ GCS Project: {settings.GCS_PROJECT_ID}')
+    print(f'ℹ Debates Bucket: {settings.GCS_DEBATES_BUCKET}')
+    print(f'ℹ Questions Bucket: {settings.GCS_QUESTIONS_BUCKET}')
+    
+    # Initialize client
+    credentials_path = str(settings.GCS_CREDENTIALS_PATH)
+    if os.path.exists(credentials_path):
+        client = storage.Client.from_service_account_json(credentials_path)
+    else:
+        client = storage.Client(project=settings.GCS_PROJECT_ID)
+    
+    # Function to check and create bucket
+    def ensure_bucket_exists(bucket_name):
+        try:
+            bucket = client.bucket(bucket_name)
+            # Try to get bucket metadata to check if it exists
+            try:
+                bucket.reload()
+                print(f'✓ Bucket exists: {bucket_name}')
+                return True
+            except gcs_exceptions.NotFound:
+                # Bucket doesn't exist, create it
+                print(f'⚠ Bucket does not exist, creating: {bucket_name}')
+                bucket = client.create_bucket(bucket_name, location=settings.GCS_REGION)
+                print(f'✓ Bucket created successfully: {bucket_name}')
+                return True
+            except gcs_exceptions.Forbidden:
+                # Don't have permission to check, try to use it anyway
+                print(f'⚠ Cannot verify bucket (permission denied), assuming exists: {bucket_name}')
+                return True
+        except gcs_exceptions.Forbidden as e:
+            print(f'✗ Permission denied for bucket {bucket_name}: {str(e)}')
+            return False
+        except Exception as e:
+            print(f'✗ Error with bucket {bucket_name}: {str(e)}')
+            return False
+    
+    # Check/create both buckets
+    debates_ok = ensure_bucket_exists(settings.GCS_DEBATES_BUCKET)
+    questions_ok = ensure_bucket_exists(settings.GCS_QUESTIONS_BUCKET)
+    
+    if debates_ok and questions_ok:
+        print('✓ GCS setup completed successfully')
+        sys.exit(0)
+    else:
+        print('⚠ GCS setup completed with warnings - some buckets may not be accessible')
+        sys.exit(0)
+        
+except Exception as e:
+    print(f'✗ GCS setup failed: {e}')
+    print('⚠️  Continuing without GCS - files will only be stored locally')
+    import traceback
+    traceback.print_exc()
+    sys.exit(0)  # Don't fail startup if GCS isn't available
+" 2>&1 | while read line; do
+        if [[ $line == ✓* ]]; then
+            print_status "${line#✓ }"
+        elif [[ $line == ✗* ]]; then
+            print_error "${line#✗ }"
+        elif [[ $line == ⚠* ]]; then
+            print_warning "${line#⚠ }"
+        elif [[ $line == ℹ* ]]; then
+            print_info "${line#ℹ }"
+        else
+            echo "   $line"
+        fi
+    done
+    
+    show_progress 7 11 "GCS setup completed"
+    
+    # Initialize master data tables if they don't exist
+    print_info "Checking master data tables..."
+    
+    # Check if master data exists
+    MASTER_DATA_EXISTS=$(python manage.py shell --no-startup -c "
+from services.questions.models import QuestionMasterData, Session, LokSabha, ParliamentInstitution
+from services.debates.models import DebateMasterData
+import sys
+import os
+os.environ['DJANGO_COLORS'] = 'nocolor'
+
+# Count LS sessions (sessions linked to LokSabha)
+ls_sessions = Session.objects.filter(lok_sabha__isnull=False).count()
+
+# Count RS sessions (for now, we'll count RS session numbers from questions/debates metadata)
+# RS doesn't use the Session model the same way, so we count unique session numbers from data
+rs_questions = QuestionMasterData.objects.filter(parent_institution__name='rajya_sabha').count() if ParliamentInstitution.objects.filter(name='rajya_sabha').exists() else 0
+rs_sessions = QuestionMasterData.objects.filter(parent_institution__name='rajya_sabha').values('session_number').distinct().count() if ParliamentInstitution.objects.filter(name='rajya_sabha').exists() else 0
+
+ls_questions = QuestionMasterData.objects.filter(parent_institution__name='lok_sabha').count() if ParliamentInstitution.objects.filter(name='lok_sabha').exists() else 0
+ls_debates = DebateMasterData.objects.filter(parent_institution__name='lok_sabha').count() if ParliamentInstitution.objects.filter(name='lok_sabha').exists() else 0
+
+print(f'{ls_sessions},{rs_sessions},{ls_questions},{rs_questions},{ls_debates}')
+" 2>&1 | grep -E '^[0-9,]+$')
+    
+    IFS=',' read -r LS_SESSIONS RS_SESSIONS LS_QUESTIONS RS_QUESTIONS LS_DEBATES <<< "$MASTER_DATA_EXISTS"
+    
+    # Provide defaults if variables are empty
+    LS_SESSIONS=${LS_SESSIONS:-0}
+    RS_SESSIONS=${RS_SESSIONS:-0}
+    LS_QUESTIONS=${LS_QUESTIONS:-0}
+    RS_QUESTIONS=${RS_QUESTIONS:-0}
+    LS_DEBATES=${LS_DEBATES:-0}
+    
+    # Check if we need to initialize any data
+    NEEDS_INIT=false
+    if [ "$LS_SESSIONS" -eq "0" ] || [ "$RS_SESSIONS" -eq "0" ] || [ "$LS_QUESTIONS" -eq "0" ] || [ "$RS_QUESTIONS" -eq "0" ] || [ "$LS_DEBATES" -eq "0" ]; then
+        NEEDS_INIT=true
+    fi
+    
+    if [ "$NEEDS_INIT" = true ]; then
+        print_warning "Master data tables are incomplete, initializing missing data..."
+        print_info "This will fetch data from Parliament APIs (may take 10-15 minutes)..."
+        
+        # Initialize questions master data (includes sessions, LS and RS questions)
+        if [ "$LS_SESSIONS" -eq "0" ] || [ "$RS_SESSIONS" -eq "0" ] || [ "$LS_QUESTIONS" -eq "0" ] || [ "$RS_QUESTIONS" -eq "0" ]; then
+            print_info "Initializing Questions Master Data (LS + RS)..."
+            print_info "   Current state:"
+            print_info "      • LS Sessions: $LS_SESSIONS"
+            print_info "      • RS Sessions: $RS_SESSIONS"
+            print_info "      • LS Questions: $LS_QUESTIONS"
+            print_info "      • RS Questions: $RS_QUESTIONS"
+            print_warning "   This will take 10-15 minutes - showing real-time progress..."
+            echo ""
+            
+            # Fetch COMPLETE dataset with parallel workers - SHOW REAL-TIME OUTPUT
+            python manage.py initialize_questions_master_data --workers 5 2>&1 | while IFS= read -r line; do
+                echo "      $line"
+            done
+            
+            print_status "Questions master data initialized (LS + RS)"
+        fi
+        
+        # Initialize LS debates master data
+        if [ "$LS_DEBATES" -eq "0" ]; then
+            print_info "Initializing LS Debates Master Data..."
+            print_warning "   Fetching debate dates from Parliament APIs..."
+            echo ""
+            
+            python manage.py initialize_debates_master_data 2>&1 | while IFS= read -r line; do
+                echo "      $line"
+            done
+            
+            print_status "LS Debates master data initialized"
+        fi
+        
+        # Initialize RS debates master data (NEW)
+        print_info "Initializing RS Debates Master Data..."
+        print_info "   This includes BOTH verbatim and official debates..."
+        print_warning "   Processing recent 5 sessions (verbatim) + 10 sessions (official)..."
+        echo ""
+        
+        python manage.py initialize_rs_debates_master_data --workers 3 --recent-sessions 5 --official-sessions 10 2>&1 | while IFS= read -r line; do
+            echo "      $line"
+        done
+        
+        print_status "RS Debates master data initialized"
+        
+        # Re-check counts after initialization
+        FINAL_COUNT=$(python manage.py shell --no-startup -c "
+from services.questions.models import QuestionMasterData, Session, ParliamentInstitution
+from services.debates.models import DebateMasterData
+import os
+os.environ['DJANGO_COLORS'] = 'nocolor'
+
+ls_sessions = Session.objects.filter(lok_sabha__isnull=False).count()
+rs_sessions = QuestionMasterData.objects.filter(parent_institution__name='rajya_sabha').values('session_number').distinct().count() if ParliamentInstitution.objects.filter(name='rajya_sabha').exists() else 0
+
+ls_questions = QuestionMasterData.objects.filter(parent_institution__name='lok_sabha').count() if ParliamentInstitution.objects.filter(name='lok_sabha').exists() else 0
+rs_questions = QuestionMasterData.objects.filter(parent_institution__name='rajya_sabha').count() if ParliamentInstitution.objects.filter(name='rajya_sabha').exists() else 0
+
+ls_debates = DebateMasterData.objects.filter(parent_institution__name='lok_sabha').count() if ParliamentInstitution.objects.filter(name='lok_sabha').exists() else 0
+
+print(f'{ls_sessions},{rs_sessions},{ls_questions},{rs_questions},{ls_debates}')
+" 2>&1 | grep -E '^[0-9,]+$')
+        
+        IFS=',' read -r FINAL_LS_SESSIONS FINAL_RS_SESSIONS FINAL_LS_QUESTIONS FINAL_RS_QUESTIONS FINAL_LS_DEBATES <<< "$FINAL_COUNT"
+        print_status "Master data initialization completed"
+        print_info "   • LS Sessions: ${FINAL_LS_SESSIONS:-0}"
+        print_info "   • RS Sessions: ${FINAL_RS_SESSIONS:-0}"
+        print_info "   • LS Questions: ${FINAL_LS_QUESTIONS:-0}"
+        print_info "   • RS Questions: ${FINAL_RS_QUESTIONS:-0}"
+        print_info "   • LS Debates: ${FINAL_LS_DEBATES:-0}"
+        print_info "   • RS Debates: Metadata initialized (verbatim + official)"
+    else
+        print_status "Master data already initialized"
+        print_info "   • LS Sessions: $LS_SESSIONS"
+        print_info "   • RS Sessions: $RS_SESSIONS"
+        print_info "   • LS Questions: $LS_QUESTIONS"
+        print_info "   • RS Questions: $RS_QUESTIONS"
+        print_info "   • LS Debates: $LS_DEBATES"
+        print_info "   • RS Debates: Will be checked and initialized if needed"
+        
+        # Still run RS debates initialization to ensure it's up to date (idempotent)
+        print_info "Checking RS Debates Master Data (quick check)..."
+        python manage.py initialize_rs_debates_master_data --workers 3 --recent-sessions 2 --official-sessions 5 2>&1 | while IFS= read -r line; do
+            # Only show summary lines (lines starting with special chars or containing key info)
+            if [[ "$line" =~ ^[[:space:]]*(Status:|Sessions:|Dates:|Debates:|✓|✅|❌|⚠|ℹ|═|─) ]] || [[ "$line" =~ (RESULTS|SUMMARY|Complete) ]]; then
+                echo "      $line"
+            fi
+        done
+    fi
+    
+    show_progress 8 11 "Master data setup completed"
+    
     # Check if services are already running
     local status=$(get_service_status)
     if echo "$status" | grep -q "redis:running\|celery:running\|api:running"; then
@@ -446,7 +691,7 @@ start_services() {
     tmux new-session -d -s "parliament-redis" -c "$(pwd)"
     tmux send-keys -t "parliament-redis" "redis-server" Enter
     sleep 2
-    show_progress 8 11 "Redis started"
+    show_progress 9 11 "Redis started"
     print_status "Redis server started in tmux session 'parliament-redis'"
     
     # Start Celery worker in tmux session
@@ -455,7 +700,7 @@ start_services() {
     tmux new-session -d -s "parliament-celery" -c "$(pwd)"
     tmux send-keys -t "parliament-celery" "source ../env/bin/activate && celery -A parliament_api worker --loglevel=info --concurrency=$CELERY_CONCURRENCY" Enter
     sleep 3
-    show_progress 8 11 "Celery started"
+    show_progress 10 11 "Celery started"
     print_status "Celery worker started in tmux session 'parliament-celery' (concurrency: $CELERY_CONCURRENCY)"
     
     # Start Celery Flower monitoring
@@ -463,7 +708,7 @@ start_services() {
     tmux new-session -d -s "parliament-flower" -c "$(pwd)"
     tmux send-keys -t "parliament-flower" "source ../env/bin/activate && celery -A parliament_api flower --port=5555" Enter
     sleep 2
-    show_progress 9 11 "Flower started"
+    show_progress 10 11 "Flower started"
     print_status "Celery Flower started in tmux session 'parliament-flower'"
     
     # Start Django development server
@@ -471,7 +716,7 @@ start_services() {
     tmux new-session -d -s "parliament-api" -c "$(pwd)"
     tmux send-keys -t "parliament-api" "source ../env/bin/activate && python manage.py runserver 0.0.0.0:8000" Enter
     sleep 3
-    show_progress 10 11 "API started"
+    show_progress 11 11 "API started"
     print_status "Django server started in tmux session 'parliament-api'"
     
     # Final status

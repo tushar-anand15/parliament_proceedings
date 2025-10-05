@@ -58,3 +58,4 @@ media/
 
 # Scraper raw data dumps
 scraper/*.json
+eci_scraper/

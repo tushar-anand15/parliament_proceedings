@@ -137,9 +137,16 @@ class QuestionMasterData(models.Model):
     lok_sabha = models.ForeignKey(LokSabha, on_delete=models.CASCADE, related_name='master_questions', null=True, blank=True)
     session = models.ForeignKey(Session, on_delete=models.CASCADE, related_name='master_questions', null=True, blank=True)
     
-    # Processing status
-    is_processed = models.BooleanField(default=False)  # Whether we've created a Question from this
-    processed_at = models.DateTimeField(null=True, blank=True)
+    # Processing status tracking
+    is_processed = models.BooleanField(default=False, help_text='Whether metadata has been converted to Question record')
+    processed_at = models.DateTimeField(null=True, blank=True, help_text='When metadata was converted to Question record')
+    
+    # PDF Download tracking (NEW - proper tracking)
+    pdf_downloaded = models.BooleanField(default=False, help_text='Whether PDF has been downloaded to GCS')
+    pdf_gcs_path = models.CharField(max_length=500, blank=True, help_text='GCS path where PDF is stored')
+    pdf_download_attempted_at = models.DateTimeField(null=True, blank=True, help_text='Last PDF download attempt timestamp')
+    pdf_download_attempts = models.IntegerField(default=0, help_text='Number of PDF download attempts')
+    pdf_download_error = models.TextField(blank=True, help_text='Last PDF download error message')
     
     # Raw API data
     raw_api_data = models.JSONField(default=dict, blank=True)
@@ -156,6 +163,7 @@ class QuestionMasterData(models.Model):
             models.Index(fields=['parent_institution', 'lok_sabha_number', 'session_number']),
             models.Index(fields=['question_type']),
             models.Index(fields=['is_processed']),
+            models.Index(fields=['pdf_downloaded']),  # NEW - track PDF download status
             models.Index(fields=['date']),
         ]
 

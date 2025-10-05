@@ -8,6 +8,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from drf_spectacular.utils import extend_schema
+from datetime import timedelta
 import logging
 
 from .models import Debate, DebateSpeech, DebateTag
@@ -188,13 +189,49 @@ class StartDebateScrapingView(APIView):
         ).prefetch_related('target_lok_sabhas', 'target_sessions')
         
         # Check if there's already a job for the same LS/Session combination
+        existing_job = None
         for job in active_jobs:
             if (job.target_lok_sabhas.filter(number=loksabha_no).exists() and 
                 job.target_sessions.filter(session_number=session_no).exists()):
+                existing_job = job
+                break
+        
+        # If there's an existing job, check if it's actually still running in Celery
+        if existing_job:
+            from celery.result import AsyncResult
+            from .tasks import scrape_debates_task
+            
+            # Check actual Celery task status
+            task_result = AsyncResult(existing_job.task_id, app=scrape_debates_task.app)
+            
+            # If task is PENDING (not in queue) or failed, the job is orphaned - allow new job
+            if task_result.status == 'PENDING' and existing_job.created_at < timezone.now() - timedelta(minutes=5):
+                # Job is orphaned (created >5 min ago but still PENDING - means it was never picked up)
+                logger.warning(f"Found orphaned job {existing_job.id} - marking as failed and allowing new job")
+                existing_job.status = 'failed'
+                existing_job.completed_at = timezone.now()
+                existing_job.save()
+                # Continue to create new job
+            elif task_result.status in ['SUCCESS', 'FAILURE']:
+                # Job actually completed, update status
+                existing_job.status = 'completed' if task_result.status == 'SUCCESS' else 'failed'
+                existing_job.completed_at = timezone.now()
+                existing_job.save()
+                # Continue to create new job
+            else:
+                # Job is actually running
                 return Response({
-                    'error': f'Another debate scraping job is already running for LS{loksabha_no} Session {session_no}',
-                    'active_job_id': job.id
-                }, status=400)
+                    'message': 'A scraping job for this session is already in progress',
+                    'job_id': existing_job.id,
+                    'task_id': existing_job.task_id,
+                    'job_name': existing_job.name,
+                    'status': existing_job.status,
+                    'loksabha_no': loksabha_no,
+                    'session_no': session_no,
+                    'progress_percent': existing_job.progress_percent,
+                    'note': 'Returning existing job. Use /api/debates/task-status/<task_id>/ to monitor progress.',
+                    'is_existing_job': True
+                })
         
         try:
             # Create and start scraping

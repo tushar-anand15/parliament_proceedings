@@ -11,6 +11,9 @@ from .models import Question, QuestionMasterData, LokSabha, Session, Member, Min
 from .question_download_service import QuestionDownloadService
 from .master_data_service import QuestionMasterDataService
 from .rs_master_data_service import RajyaSabhaMasterDataService
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class QuestionViewSet(viewsets.ModelViewSet):
@@ -104,15 +107,21 @@ class QuestionViewSet(viewsets.ModelViewSet):
                 })
             
             return Response({
-                'questions': questions,
-                'total_questions': len(questions),
-                'total_in_database': total_count,
-                'filters_applied': {
-                    'lok_sabha': lok_sabha,
-                    'question_type': question_type,
-                    'search': search,
-                    'limit': limit
-                }
+                'status': 'success',
+                'data': {
+                    'questions': questions,
+                    'pagination': {
+                        'total': total_count,
+                        'limit': limit,
+                        'returned': len(questions)
+                    },
+                    'filters_applied': {
+                        'lok_sabha': lok_sabha,
+                        'question_type': question_type,
+                        'search': search
+                    }
+                },
+                'message': f'Retrieved {len(questions)} LS questions'
             })
             
         except Exception as e:
@@ -1147,12 +1156,12 @@ class RSQuestionBulkDownloadView(APIView):
             download_all_session = request.data.get('download_all_session', False)
             
             if download_all_session and session_number:
-                # Download all questions for a specific session
+                # Download all questions for a specific session that haven't been downloaded yet
                 rs_institution = ParliamentInstitution.objects.get(name='rajya_sabha')
                 session_questions = QuestionMasterData.objects.filter(
                     parent_institution=rs_institution,
                     session_number=session_number,
-                    is_processed=False
+                    pdf_downloaded=False  # FIXED: Check if PDF downloaded, not if metadata processed
                 ).exclude(questions_file_path='')
                 
                 master_data_ids = list(session_questions.values_list('id', flat=True))

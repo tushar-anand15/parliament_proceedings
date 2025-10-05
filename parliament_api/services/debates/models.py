@@ -20,6 +20,10 @@ class Debate(models.Model):
         ('corrected', 'Corrected Proceedings'),
         ('synopsis', 'Synopsis'),
         ('text_of_debate', 'Text of Debate'),
+        ('verbatim', 'Verbatim Debates (RS)'),
+        ('official_qa', 'Official Q&A (RS)'),
+        ('official_other', 'Official Other (RS)'),
+        ('official', 'Official Debates (RS)'),
     ]
     
     STATUS_CHOICES = [
@@ -43,6 +47,7 @@ class Debate(models.Model):
     debate_type = models.CharField(max_length=20, choices=DEBATE_TYPES, default='text_of_debate')
     debate_category = models.CharField(max_length=20, choices=DEBATE_CATEGORIES, default='uncorrected', help_text='Whether this is corrected or uncorrected proceedings')
     language = models.CharField(max_length=50, default='en')
+    time_slot = models.CharField(max_length=100, blank=True, null=True, help_text='Time slot for RS verbatim debates (e.g., "11:00-12:00 Noon") or Question number for RS official debates')
     
     # PDF Information
     pdf_url = models.URLField(max_length=500, blank=True)
@@ -67,13 +72,14 @@ class Debate(models.Model):
     last_scraped = models.DateTimeField(null=True, blank=True)
     
     class Meta:
-        unique_together = ['parent_institution', 'lok_sabha', 'session', 'debate_date', 'debate_category', 'language']
+        unique_together = ['parent_institution', 'debate_date', 'debate_category', 'language', 'time_slot']
         ordering = ['-debate_date']
         indexes = [
-            models.Index(fields=['parent_institution', 'lok_sabha', 'session', 'debate_date']),
+            models.Index(fields=['parent_institution', 'debate_date']),
             models.Index(fields=['status']),
             models.Index(fields=['debate_date']),
             models.Index(fields=['debate_category']),
+            models.Index(fields=['time_slot']),
         ]
     
     def __str__(self):

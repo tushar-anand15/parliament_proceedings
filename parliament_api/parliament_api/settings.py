@@ -17,8 +17,13 @@ from dotenv import load_dotenv
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Load environment variables from .env file
-load_dotenv(BASE_DIR.parent / '.env')
+# Load environment variables from .env file  
+# BASE_DIR is parliament_proceedings/parliament_api/, .env is in the same directory
+env_path = BASE_DIR / '.env'
+if not env_path.exists():
+    raise FileNotFoundError(f".env file not found at: {env_path}")
+# override=True ensures .env values override any existing environment variables
+load_dotenv(env_path, override=True)
 
 
 # Quick-start development settings - unsuitable for production
@@ -340,14 +345,14 @@ AI_SERVICE_ENABLED = False
 AI_API_KEY = ""  # To be set via environment variables
 AI_MODEL_NAME = "gpt-3.5-turbo"  # Default model
 
-# Google Cloud Storage Settings
-GCS_PROJECT_ID = os.getenv('GCS_PROJECT_ID', 'parliament-process')
+# Google Cloud Storage Settings - ALL VALUES MUST BE IN .env
+GCS_PROJECT_ID = os.environ['GCS_PROJECT_ID']  # Will crash if not in .env
 GCS_CREDENTIALS_PATH = os.getenv('GCS_CREDENTIALS_PATH', BASE_DIR / 'parliament-process-90c920ce4243.json')
-GCS_DEBATES_BUCKET = os.getenv('GCS_DEBATES_BUCKET', 'parliament-ls-debates')
-GCS_QUESTIONS_BUCKET = os.getenv('GCS_QUESTIONS_BUCKET', 'parliament-ls-questions')
-GCS_PRESIGNED_URL_EXPIRATION = int(os.getenv('GCS_PRESIGNED_URL_EXPIRATION', '3600'))  # 1 hour
-GCS_AUTO_DELETE_LOCAL = os.getenv('GCS_AUTO_DELETE_LOCAL', 'true').lower() == 'true'
-GCS_REGION = os.getenv('GCS_REGION', 'asia-south1')  # Mumbai region
+GCS_DEBATES_BUCKET = os.environ['GCS_DEBATES_BUCKET']  # Will crash if not in .env
+GCS_QUESTIONS_BUCKET = os.environ['GCS_QUESTIONS_BUCKET']  # Will crash if not in .env
+GCS_PRESIGNED_URL_EXPIRATION = int(os.environ.get('GCS_PRESIGNED_URL_EXPIRATION', '3600'))
+GCS_AUTO_DELETE_LOCAL = os.environ.get('GCS_AUTO_DELETE_LOCAL', 'true').lower() == 'true'
+GCS_REGION = os.environ.get('GCS_REGION', 'asia-south1')
 
 # Admin User Settings (for initial setup)
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'parliament_admin')

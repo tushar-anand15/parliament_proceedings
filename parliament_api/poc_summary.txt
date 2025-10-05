@@ -1,0 +1,33 @@
+PARLIAMENT API - PROOF OF CONCEPT RESULTS
+==================================================
+
+Test Started: 2025-09-26T09:55:11.301317
+Test Completed: 2025-09-26T09:55:33.942786
+Duration: 22.6 seconds
+
+DEBATES COLLECTION:
+- Collected: 8
+- Downloaded: 10
+- Failed: 1
+- Combinations tested: 1
+
+QUESTIONS COLLECTION:
+- Total: 149,564
+- Status: skipped - already proven robust
+- Downloaded: 0
+
+FILE STATISTICS:
+- Files downloaded: 85
+- Storage used: 45.83 MB
+- Average file size: 0.54 MB
+
+DOCUMENT CATEGORIES:
+- parl_debate: 96
+- parl_question: 60
+
+FILE VERIFICATION:
+- Debate files on disk: 25
+- Question files on disk: 60
+- Verified storage: 45.83 MB
+- Storage location: /Users/tusharanand/Desktop/parliament_proceedings/parliament_api/media
+

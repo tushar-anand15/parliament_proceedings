@@ -2,38 +2,38 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from . import views
 
-# Create a router and register our viewsets
-router = DefaultRouter()
-router.register(r'questions', views.QuestionViewSet)
-# router.register(r'lok-sabhas', views.LokSabhaViewSet)  # Will be added later
-# router.register(r'sessions', views.SessionViewSet)    # Will be added later
-# router.register(r'members', views.MemberViewSet)      # Will be added later
-# router.register(r'ministries', views.MinistryViewSet) # Will be added later
+# Create a router for Lok Sabha questions
+ls_router = DefaultRouter()
+ls_router.register(r'questions', views.QuestionViewSet)
+# ls_router.register(r'lok-sabhas', views.LokSabhaViewSet)  # Will be added later
+# ls_router.register(r'sessions', views.SessionViewSet)    # Will be added later
+# ls_router.register(r'members', views.MemberViewSet)      # Will be added later
+# ls_router.register(r'ministries', views.MinistryViewSet) # Will be added later
 
 app_name = 'questions'
 
 urlpatterns = [
-    path('', include(router.urls)),
-    # Additional custom endpoints
-    path('stats/', views.question_stats, name='question-stats'),
+    # Lok Sabha endpoints (consistent structure)
+    path('ls/', include(ls_router.urls)),
+    path('ls/stats/', views.question_stats, name='ls-question-stats'),
     
-    # Master Data endpoints
-    path('master-data/', views.QuestionMasterDataView.as_view(), name='question-master-data'),
-    path('master-data/list/', views.QuestionMasterDataListView.as_view(), name='question-master-data-list'),
-    path('master-data/bulk-download/', views.QuestionMasterDataBulkDownloadView.as_view(), name='question-master-data-bulk-download'),
+    # Lok Sabha Master Data endpoints
+    path('ls/master-data/', views.QuestionMasterDataView.as_view(), name='ls-question-master-data'),
+    path('ls/master-data/list/', views.QuestionMasterDataListView.as_view(), name='ls-question-master-data-list'),
+    path('ls/master-data/bulk-download/', views.QuestionMasterDataBulkDownloadView.as_view(), name='ls-question-master-data-bulk-download'),
     
-    # Session-based Testing endpoints
-    path('sessions/', views.QuestionSessionTestView.as_view(), name='question-sessions'),
-    path('sessions/summary/', views.QuestionSessionSummaryView.as_view(), name='question-session-summary'),
+    # Lok Sabha Session-based Testing endpoints
+    path('ls/sessions/', views.QuestionSessionTestView.as_view(), name='ls-question-sessions'),
+    path('ls/sessions/summary/', views.QuestionSessionSummaryView.as_view(), name='ls-question-session-summary'),
     
-    # Celery task endpoints
-    path('task-status/<str:task_id>/', views.QuestionCeleryTaskStatusView.as_view(), name='question-celery-task-status'),
-    path('bulk-download/', views.QuestionBulkDownloadView.as_view(), name='question-bulk-download'),
-    path('process-queue/', views.QuestionDownloadQueueView.as_view(), name='question-process-queue'),
-    path('download-statistics/', views.QuestionDownloadStatisticsView.as_view(), name='question-download-statistics'),
-    path('populate/', views.QuestionPopulateView.as_view(), name='question-populate'),
+    # Lok Sabha Celery task endpoints
+    path('ls/task-status/<str:task_id>/', views.QuestionCeleryTaskStatusView.as_view(), name='ls-question-celery-task-status'),
+    path('ls/bulk-download/', views.QuestionBulkDownloadView.as_view(), name='ls-question-bulk-download'),
+    path('ls/process-queue/', views.QuestionDownloadQueueView.as_view(), name='ls-question-process-queue'),
+    path('ls/download-statistics/', views.QuestionDownloadStatisticsView.as_view(), name='ls-question-download-statistics'),
+    path('ls/populate/', views.QuestionPopulateView.as_view(), name='ls-question-populate'),
     
-    # Rajya Sabha endpoints (integrated)
+    # Rajya Sabha endpoints (consistent structure)
     path('rs/master-data/', views.RSQuestionMasterDataView.as_view(), name='rs-question-master-data'),
     path('rs/master-data/list/', views.RSQuestionMasterDataListView.as_view(), name='rs-question-master-data-list'),
     path('rs/statistics/', views.RSQuestionStatisticsView.as_view(), name='rs-question-statistics'),

@@ -36,7 +36,10 @@ def api_root(request):
         'redoc': '/api/redoc/',
         'endpoints': {
             'authentication': '/api/auth/',
-            'questions': '/api/questions/ (includes RS at /api/questions/rs/)',
+            'questions': {
+                'lok_sabha': '/api/questions/ls/',
+                'rajya_sabha': '/api/questions/rs/'
+            },
             'debates': '/api/debates/',
             'scraper': '/api/scraper/',
             'files': '/api/files/',
@@ -63,7 +66,7 @@ urlpatterns = [
     
     # Service endpoints
     path('api/auth/', include('services.user_auth.urls')),
-    path('api/questions/', include('services.questions.urls')),  # Now includes RS endpoints
+    path('api/questions/', include('services.questions.urls')),  # LS at /ls/, RS at /rs/
     path('api/scraper/', include('services.scraper.urls')),
     path('api/files/', include('services.files.urls')),
     path('api/ai/', include('services.ai_service.urls')),

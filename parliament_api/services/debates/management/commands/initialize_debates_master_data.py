@@ -2,12 +2,13 @@ import sys
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 from services.debates.debate_master_data_service import DebateMasterDataService
+from services.debates.uncorrected_debate_master_data_service import UncorrectedDebateMasterDataService
 from services.debates.models import DebateMasterData
-from services.questions.models import Session
+from services.questions.models import Session, LokSabha
 
 
 class Command(BaseCommand):
-    help = 'Initialize debate master data by fetching all available session dates from Parliament APIs'
+    help = 'Initialize debate master data (CORRECTED and UNCORRECTED) by fetching all available session dates from Parliament APIs'
     
     def add_arguments(self, parser):
         parser.add_argument(
@@ -30,8 +31,21 @@ class Command(BaseCommand):
             action='store_true',
             help='Show what would be done without actually doing it',
         )
+        parser.add_argument(
+            '--corrected-only',
+            action='store_true',
+            help='Initialize only CORRECTED debates (skip uncorrected)',
+        )
+        parser.add_argument(
+            '--uncorrected-only',
+            action='store_true',
+            help='Initialize only UNCORRECTED debates (skip corrected)',
+        )
     
     def handle(self, *args, **options):
+        # Suppress INFO logs during initialization (only show WARNING and above)
+        import logging
+        logging.getLogger('services.debates.debate_master_data_service').setLevel(logging.WARNING)
         try:
             self.stdout.write(
                 self.style.SUCCESS('🏛️ Parliament Debates Master Data Initialization')
@@ -77,7 +91,13 @@ class Command(BaseCommand):
             sys.exit(1)
     
     def _handle_all_sessions(self, service, options):
-        """Handle initialization for all sessions"""
+        """Handle initialization for all sessions - BOTH corrected and uncorrected"""
+        
+        corrected_service = service  # DebateMasterDataService
+        uncorrected_service = UncorrectedDebateMasterDataService()
+        
+        skip_corrected = options.get('uncorrected_only', False)
+        skip_uncorrected = options.get('corrected_only', False)
         
         if not options['force_update']:
             existing_count = DebateMasterData.objects.count()
@@ -91,28 +111,59 @@ class Command(BaseCommand):
                 return
         
         if options['dry_run']:
-            self.stdout.write('\n🔍 Would initialize all debate master data from Parliament APIs')
+            if not skip_corrected:
+                self.stdout.write('\n🔍 Would initialize CORRECTED debate master data')
+            if not skip_uncorrected:
+                self.stdout.write('🔍 Would initialize UNCORRECTED debate master data')
             return
         
-        self.stdout.write('\n🚀 Starting full initialization...')
+        # Initialize CORRECTED debates
+        if not skip_corrected:
+            self.stdout.write('\n🚀 PHASE 1: Initializing CORRECTED debate master data...')
+            
+            import io
+            from contextlib import redirect_stdout
+            
+            with redirect_stdout(io.StringIO()) as f:
+                corrected_result = corrected_service.initialize_debate_master_data(
+                    force_update=options['force_update']
+                )
+            
+            output = f.getvalue()
+            for line in output.strip().split('\n'):
+                if line.strip():
+                    self.stdout.write(f'   {line}')
+            
+            self.stdout.write(self.style.SUCCESS('✅ CORRECTED debates master data initialized'))
         
-        # Redirect service print statements to Django command output
-        import io
-        from contextlib import redirect_stdout
+        # Initialize UNCORRECTED debates
+        if not skip_uncorrected:
+            self.stdout.write('\n🚀 PHASE 2: Initializing UNCORRECTED debate master data (includes PDF URLs)...')
+            
+            try:
+                uncorrected_result = uncorrected_service.fetch_uncorrected_master_data_for_all_sessions()
+                
+                self.stdout.write(f'\n📊 Uncorrected Debates Results:')
+                self.stdout.write(f'   • Sessions processed: {uncorrected_result.get("processed_sessions", 0)}/{uncorrected_result.get("total_sessions", 0)}')
+                self.stdout.write(f'   • Master data created: {uncorrected_result.get("total_created", 0)}')
+                self.stdout.write(f'   • Master data updated: {uncorrected_result.get("total_updated", 0)}')
+                self.stdout.write(f'   • Total dates: {uncorrected_result.get("total_dates", 0)}')
+                self.stdout.write(f'   • Total PDF files: {uncorrected_result.get("total_pdf_files", 0)}')
+                
+                errors = uncorrected_result.get('errors', [])
+                if errors:
+                    self.stdout.write(f'   • Errors: {len(errors)}')
+                    for error in errors[:3]:
+                        self.stdout.write(f'     - {error}')
+                    if len(errors) > 3:
+                        self.stdout.write(f'     ... and {len(errors) - 3} more')
+                
+                self.stdout.write(self.style.SUCCESS('✅ UNCORRECTED debates master data initialized'))
+                
+            except Exception as e:
+                self.stdout.write(self.style.ERROR(f'❌ Uncorrected debates initialization failed: {e}'))
         
-        with redirect_stdout(io.StringIO()) as f:
-            result = service.initialize_debate_master_data(
-                force_update=options['force_update']
-            )
-        
-        # Print captured output
-        output = f.getvalue()
-        for line in output.strip().split('\n'):
-            if line.strip():
-                self.stdout.write(f'   {line}')
-        
-        # Print results
-        self._print_results(result)
+        self.stdout.write(self.style.SUCCESS('\n🎉 Debate master data initialization completed!'))
     
     def _handle_specific_lok_sabha(self, service, options):
         """Handle initialization for specific Lok Sabha"""
