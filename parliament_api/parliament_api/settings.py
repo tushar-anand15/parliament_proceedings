@@ -223,6 +223,10 @@ MEDIA_ROOT = BASE_DIR / 'media'
 FILE_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024  # 10MB
 DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024  # 10MB
 
+# API Request Rate Limiting
+API_REQUEST_DELAY_MIN = float(os.getenv('API_REQUEST_DELAY_MIN', '0.1'))  # Minimum delay in seconds
+API_REQUEST_DELAY_MAX = float(os.getenv('API_REQUEST_DELAY_MAX', '0.3'))  # Maximum delay in seconds
+
 # Celery Configuration
 CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0')
 CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', 'redis://localhost:6379/0')

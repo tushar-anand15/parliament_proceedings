@@ -35,8 +35,8 @@ class Command(BaseCommand):
         parser.add_argument(
             '--workers',
             type=int,
-            default=3,
-            help='Number of parallel workers for verbatim debates (default: 3)'
+            default=10,
+            help='Number of parallel workers for verbatim debates (default: 10)'
         )
         
         parser.add_argument(

@@ -584,7 +584,7 @@ print(f'{ls_sessions},{rs_sessions},{ls_questions},{rs_questions},{ls_debates}')
             echo ""
             
             # Fetch COMPLETE dataset with parallel workers - SHOW REAL-TIME OUTPUT
-            python manage.py initialize_questions_master_data --workers 5 2>&1 | while IFS= read -r line; do
+            python manage.py initialize_questions_master_data --workers 10 2>&1 | while IFS= read -r line; do
                 echo "      $line"
             done
             
@@ -610,7 +610,7 @@ print(f'{ls_sessions},{rs_sessions},{ls_questions},{rs_questions},{ls_debates}')
         print_warning "   Processing recent 5 sessions (verbatim) + 10 sessions (official)..."
         echo ""
         
-        python manage.py initialize_rs_debates_master_data --workers 3 --recent-sessions 5 --official-sessions 10 2>&1 | while IFS= read -r line; do
+        python manage.py initialize_rs_debates_master_data --workers 10 --recent-sessions 5 --official-sessions 10 2>&1 | while IFS= read -r line; do
             echo "      $line"
         done
         
@@ -653,7 +653,7 @@ print(f'{ls_sessions},{rs_sessions},{ls_questions},{rs_questions},{ls_debates}')
         
         # Still run RS debates initialization to ensure it's up to date (idempotent)
         print_info "Checking RS Debates Master Data (quick check)..."
-        python manage.py initialize_rs_debates_master_data --workers 3 --recent-sessions 2 --official-sessions 5 2>&1 | while IFS= read -r line; do
+        python manage.py initialize_rs_debates_master_data --workers 10 --recent-sessions 2 --official-sessions 5 2>&1 | while IFS= read -r line; do
             # Only show summary lines (lines starting with special chars or containing key info)
             if [[ "$line" =~ ^[[:space:]]*(Status:|Sessions:|Dates:|Debates:|✓|✅|❌|⚠|ℹ|═|─) ]] || [[ "$line" =~ (RESULTS|SUMMARY|Complete) ]]; then
                 echo "      $line"

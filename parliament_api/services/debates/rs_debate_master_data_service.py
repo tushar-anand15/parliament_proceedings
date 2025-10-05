@@ -10,6 +10,7 @@ Supports two types of RS debates:
 import requests
 import logging
 import time
+import random
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -271,6 +272,11 @@ class RSDebateMasterDataService:
                 errors_count = 0
                 
                 try:
+                    from django.conf import settings
+                    
+                    # Random delay before starting session
+                    time.sleep(random.uniform(settings.API_REQUEST_DELAY_MIN, settings.API_REQUEST_DELAY_MAX))
+                    
                     dates = self.fetch_verbatim_session_dates(session_no)
                     
                     for date_obj in dates:
@@ -285,8 +291,8 @@ class RSDebateMasterDataService:
                             dates_count += 1
                             debates_count += len(debates)
                             
-                            # Rate limiting
-                            time.sleep(0.5)
+                            # Random delay between date requests
+                            time.sleep(random.uniform(settings.API_REQUEST_DELAY_MIN, settings.API_REQUEST_DELAY_MAX))
                         except Exception as e:
                             logger.error(f"Error fetching debates for {session_no}/{date_str}: {e}")
                             errors_count += 1

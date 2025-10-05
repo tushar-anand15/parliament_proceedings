@@ -300,8 +300,8 @@ class Command(BaseCommand):
                 # Add randomized delay (0.2-0.5 seconds) to avoid overwhelming API
                 # Skip on retries since exponential backoff will handle it
                 if attempt == 0:
-                    random_delay = random.uniform(0.2, 0.5)
-                    time.sleep(random_delay)
+                    from django.conf import settings
+                    time.sleep(random.uniform(settings.API_REQUEST_DELAY_MIN, settings.API_REQUEST_DELAY_MAX))
                 elif attempt > 0:
                     delay = min(2 ** attempt, 60)
                     time.sleep(delay)
@@ -548,8 +548,8 @@ class Command(BaseCommand):
                 # Add randomized delay (0.2-0.5 seconds) to avoid overwhelming API
                 # Skip on retries since exponential backoff will handle it
                 if attempt == 0:
-                    random_delay = random.uniform(0.2, 0.5)
-                    time.sleep(random_delay)
+                    from django.conf import settings
+                    time.sleep(random.uniform(settings.API_REQUEST_DELAY_MIN, settings.API_REQUEST_DELAY_MAX))
                 elif attempt > 0:
                     # Exponential backoff delay
                     delay = min(2 ** attempt, 60)  # Cap at 60 seconds

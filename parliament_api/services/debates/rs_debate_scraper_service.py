@@ -6,6 +6,7 @@ Handles scraping and downloading RS debates (both verbatim and official)
 import logging
 import uuid
 import time
+import random
 import requests
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -132,8 +133,9 @@ class RSDebateScraperService:
                             logger.error(error_msg)
                             result['errors'].append(error_msg)
                     
-                    # Rate limiting
-                    time.sleep(0.5)
+                    # Random delay between dates
+                    from django.conf import settings
+                    time.sleep(random.uniform(settings.API_REQUEST_DELAY_MIN, settings.API_REQUEST_DELAY_MAX))
                 
                 except Exception as e:
                     error_msg = f"Error processing date {date_str}: {e}"
@@ -302,8 +304,9 @@ class RSDebateScraperService:
                     if start >= total:
                         break
                     
-                    # Rate limiting between API calls
-                    time.sleep(0.5)
+                    # Random delay between API calls
+                    from django.conf import settings
+                    time.sleep(random.uniform(settings.API_REQUEST_DELAY_MIN, settings.API_REQUEST_DELAY_MAX))
                 
                 # Context manager will auto-flush remaining items
             
