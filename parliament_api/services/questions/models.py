@@ -151,6 +151,9 @@ class QuestionMasterData(models.Model):
     # Raw API data
     raw_api_data = models.JSONField(default=dict, blank=True)
     
+    # Metadata hash for duplicate detection (SHA256 of key fields)
+    metadata_hash = models.CharField(max_length=64, blank=True, default='', db_index=True, help_text='Hash of metadata for duplicate detection')
+    
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

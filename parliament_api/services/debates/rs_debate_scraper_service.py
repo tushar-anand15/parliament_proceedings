@@ -133,10 +133,6 @@ class RSDebateScraperService:
                             logger.error(error_msg)
                             result['errors'].append(error_msg)
                     
-                    # Random delay between dates
-                    from django.conf import settings
-                    time.sleep(random.uniform(settings.API_REQUEST_DELAY_MIN, settings.API_REQUEST_DELAY_MAX))
-                
                 except Exception as e:
                     error_msg = f"Error processing date {date_str}: {e}"
                     logger.error(error_msg)
@@ -303,10 +299,6 @@ class RSDebateScraperService:
                     # Check if we've fetched all
                     if start >= total:
                         break
-                    
-                    # Random delay between API calls
-                    from django.conf import settings
-                    time.sleep(random.uniform(settings.API_REQUEST_DELAY_MIN, settings.API_REQUEST_DELAY_MAX))
                 
                 # Context manager will auto-flush remaining items
             

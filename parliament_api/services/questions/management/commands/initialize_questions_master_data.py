@@ -224,9 +224,19 @@ class Command(BaseCommand):
         self.stdout.write(f'   Unstarred questions: {rs_results["unstarred_questions"]:,}')
     
     def _process_rs_sessions_parallel(self, rs_service, session_numbers, workers, timeout):
-        """Process RS sessions in parallel"""
+        """Process RS sessions in parallel with proper deduplication"""
+        
+        # CRITICAL FIX: Deduplicate session numbers
+        unique_session_numbers = list(set(session_numbers))
+        
+        if len(unique_session_numbers) < len(session_numbers):
+            duplicates_removed = len(session_numbers) - len(unique_session_numbers)
+            self.stdout.write(self.style.WARNING(
+                f'⚠️  Removed {duplicates_removed} duplicate RS sessions from queue'
+            ))
+        
         results = {
-            'total_sessions': len(session_numbers),
+            'total_sessions': len(unique_session_numbers),
             'processed_sessions': 0,
             'total_created': 0,
             'total_updated': 0,
@@ -235,13 +245,13 @@ class Command(BaseCommand):
             'errors': []
         }
         
-        self.stdout.write(f'🔥 Starting {workers} parallel workers for {len(session_numbers)} RS sessions...')
+        self.stdout.write(f'🔥 Starting {workers} parallel workers for {len(unique_session_numbers)} unique RS sessions...')
         
         # Process in parallel
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            # Submit all sessions for processing
+            # Submit all unique sessions for processing
             future_to_session = {}
-            for session_number in session_numbers:
+            for session_number in unique_session_numbers:
                 future = executor.submit(self._process_single_rs_session, rs_service, session_number, timeout)
                 future_to_session[future] = session_number
             
@@ -267,7 +277,7 @@ class Command(BaseCommand):
                     # Show progress bar
                     show_progress_bar(
                         completed,
-                        len(session_numbers),
+                        len(unique_session_numbers),
                         prefix='   RS Sessions',
                         suffix=f'({results["total_created"]:,} created, {results["total_updated"]:,} updated) ~{remaining/60:.0f}min'
                     )
@@ -277,7 +287,7 @@ class Command(BaseCommand):
                     results['errors'].append(error_msg)
                     
                     self.stdout.write(
-                        f'❌ ({completed}/{len(session_numbers)}) RS Session{session_number}: {str(e)[:60]}...'
+                        f'❌ ({completed}/{len(unique_session_numbers)}) RS Session{session_number}: {str(e)[:60]}...'
                     )
         
         # Get final counts
@@ -297,12 +307,9 @@ class Command(BaseCommand):
         """Process a single RS session with retry logic and randomized delay"""
         for attempt in range(max_retries):
             try:
-                # Add randomized delay (0.2-0.5 seconds) to avoid overwhelming API
-                # Skip on retries since exponential backoff will handle it
-                if attempt == 0:
-                    from django.conf import settings
-                    time.sleep(random.uniform(settings.API_REQUEST_DELAY_MIN, settings.API_REQUEST_DELAY_MAX))
-                elif attempt > 0:
+                # No delay on first attempt for metadata fetching (fast!)
+                # Only exponential backoff on retries
+                if attempt > 0:
                     delay = min(2 ** attempt, 60)
                     time.sleep(delay)
                     logger.info(f"Retry {attempt + 1}/{max_retries} for RS Session{session_number} after {delay}s delay")
@@ -420,33 +427,30 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING(f'⚠️ Coverage test: {overall_rate:.1f}% accessibility'))
     
     def _initialize_rs_data(self, rs_service, force_update, workers, timeout):
-        """Initialize Rajya Sabha data"""
-        # Get available sessions
-        available_sessions = rs_service.fetch_available_question_sessions()
-        self.stdout.write(f'📊 Available RS sessions: {len(available_sessions)} (from {min(available_sessions)} to {max(available_sessions)})')
+        """Initialize Rajya Sabha data - ALWAYS fetches ALL sessions"""
+        self.stdout.write('\n📡 RS Step 1: Fetching RS sessions metadata...')
         
-        # Initialize RS sessions metadata
+        # CRITICAL: Always fetch RS sessions metadata first
         rs_sessions_result = rs_service.fetch_rajya_sabha_sessions()
+        self.stdout.write(f"✅ RS Sessions metadata created/updated")
+        
+        # Get available sessions with questions
+        self.stdout.write('\n📡 RS Step 2: Getting list of sessions with question data...')
+        available_sessions = rs_service.fetch_available_question_sessions()
+        self.stdout.write(f'📊 Found {len(available_sessions)} RS sessions with questions: {min(available_sessions)}-{max(available_sessions)}')
         
         # Check existing RS data
         rs_institution = ParliamentInstitution.objects.filter(name='rajya_sabha').first()
         existing_rs_questions = QuestionMasterData.objects.filter(parent_institution=rs_institution).count() if rs_institution else 0
         
-        if not force_update and existing_rs_questions > 1000:
-            self.stdout.write(f'⚠️ RS data already exists: {existing_rs_questions:,} questions')
-            self.stdout.write('Use --force-update to refresh RS data')
-            return
+        # ALWAYS process ALL available sessions to ensure complete data
+        sessions_to_process = available_sessions
         
-        # Determine how many sessions to process
-        if force_update:
-            # Process ALL available sessions when force update is used
-            sessions_to_process = available_sessions
-            self.stdout.write(f'🚀 FORCE UPDATE: Processing ALL {len(sessions_to_process)} RS sessions: {min(sessions_to_process)}-{max(sessions_to_process)}')
+        if existing_rs_questions > 0:
+            self.stdout.write(f'ℹ️  Existing RS data: {existing_rs_questions:,} questions')
+            self.stdout.write(f'🔄 Processing ALL {len(sessions_to_process)} RS sessions to ensure completeness')
         else:
-            # Process recent sessions (last 10) for regular initialization
-            sessions_to_process = available_sessions[-10:]
-            self.stdout.write(f'🎯 Processing {len(sessions_to_process)} recent RS sessions: {min(sessions_to_process)}-{max(sessions_to_process)}')
-            self.stdout.write('💡 Use --force-update to process ALL 87 available sessions')
+            self.stdout.write(f'🚀 Processing ALL {len(sessions_to_process)} RS sessions: {min(sessions_to_process)}-{max(sessions_to_process)}')
         
         start_time = timezone.now()
         rs_results = self._process_rs_sessions_parallel(rs_service, sessions_to_process, workers, timeout)
@@ -463,10 +467,28 @@ class Command(BaseCommand):
         self.stdout.write(f'   Unstarred questions: {rs_results["unstarred_questions"]:,}')
     
     def _process_sessions_parallel(self, service, sessions_list, workers, timeout=500):
-        """Process sessions in parallel using ThreadPoolExecutor"""
+        """Process sessions in parallel using ThreadPoolExecutor with proper deduplication"""
+        
+        # CRITICAL FIX: Deduplicate sessions by (lok_sabha_number, session_number)
+        # This prevents race conditions where the same session is processed multiple times
+        seen_sessions = set()
+        unique_sessions = []
+        
+        for session in sessions_list:
+            session_key = (session.lok_sabha.number, session.session_number)
+            if session_key not in seen_sessions:
+                seen_sessions.add(session_key)
+                unique_sessions.append(session)
+            else:
+                logger.warning(f"Skipping duplicate session: LS{session.lok_sabha.number} Session{session.session_number}")
+        
+        if len(unique_sessions) < len(sessions_list):
+            self.stdout.write(self.style.WARNING(
+                f'⚠️  Removed {len(sessions_list) - len(unique_sessions)} duplicate sessions from queue'
+            ))
         
         results = {
-            'total_sessions': len(sessions_list),
+            'total_sessions': len(unique_sessions),
             'processed_sessions': 0,
             'total_created': 0,
             'total_updated': 0,
@@ -475,13 +497,13 @@ class Command(BaseCommand):
             'failed_sessions': []
         }
         
-        self.stdout.write(f'🔥 Starting {workers} parallel workers for {len(sessions_list)} sessions...')
+        self.stdout.write(f'🔥 Starting {workers} parallel workers for {len(unique_sessions)} unique sessions...')
         
         # Process in parallel
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            # Submit all sessions for processing
+            # Submit all unique sessions for processing
             future_to_session = {}
-            for session in sessions_list:
+            for session in unique_sessions:
                 future = executor.submit(self._process_single_session, service, session, timeout)
                 future_to_session[future] = session
             
@@ -510,7 +532,7 @@ class Command(BaseCommand):
                     # Show progress bar
                     show_progress_bar(
                         completed,
-                        len(sessions_list),
+                        len(unique_sessions),
                         prefix='   Sessions',
                         suffix=f'({results["total_created"]:,} created, {results["total_updated"]:,} updated) ~{remaining/60:.0f}min'
                     )
@@ -534,7 +556,7 @@ class Command(BaseCommand):
                     })
                     
                     self.stdout.write(
-                        f'❌ ({completed}/{len(sessions_list)}) LS{session.lok_sabha.number} '
+                        f'❌ ({completed}/{len(unique_sessions)}) LS{session.lok_sabha.number} '
                         f'Session{session.session_number}: {str(e)[:60]}...'
                     )
         
@@ -545,22 +567,19 @@ class Command(BaseCommand):
         
         for attempt in range(max_retries):
             try:
-                # Add randomized delay (0.2-0.5 seconds) to avoid overwhelming API
-                # Skip on retries since exponential backoff will handle it
-                if attempt == 0:
-                    from django.conf import settings
-                    time.sleep(random.uniform(settings.API_REQUEST_DELAY_MIN, settings.API_REQUEST_DELAY_MAX))
-                elif attempt > 0:
+                # No delay on first attempt for metadata fetching (fast!)
+                # Only use exponential backoff on retries
+                if attempt > 0:
                     # Exponential backoff delay
                     delay = min(2 ** attempt, 60)  # Cap at 60 seconds
                     time.sleep(delay)
                     logger.info(f"Retry {attempt + 1}/{max_retries} for LS{session.lok_sabha.number} Session{session.session_number} after {delay}s delay")
                 
-                # Call with timeout parameter
+                # Call with pagination (page_size=500 is default for optimal speed)
                 result = service.fetch_questions_for_session(
                     session.lok_sabha.number,
                     session.session_number,
-                    page_size=10000,
+                    page_size=500,  # Smaller page size to avoid timeouts
                     use_fallback=True,
                     timeout=timeout
                 )

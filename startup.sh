@@ -375,7 +375,7 @@ start_services() {
     # Setup PostgreSQL database and user
     print_info "Setting up PostgreSQL database..."
     
-    # Load environment variables and export them
+    # Load environment variables and export them FIRST
     if [ -f "../.env" ]; then
         set -a  # automatically export all variables
         source ../.env
@@ -388,14 +388,19 @@ start_services() {
     DB_USER=${DB_USER:-parliament_user}
     DB_PASSWORD=${DB_PASSWORD:-***REMOVED_SECRET***}
     
+    # Load superuser credentials from env NOW (so they're available everywhere)
+    ADMIN_USERNAME=${DJANGO_SUPERUSER_USERNAME:-admin}
+    ADMIN_EMAIL=${DJANGO_SUPERUSER_EMAIL:-admin@example.com}
+    ADMIN_PASSWORD=${DJANGO_SUPERUSER_PASSWORD:-admin}
+    
     # Check for RESET_DB flag
     if [ -f ".reset_db_flag" ]; then
         print_warning "Database reset requested..."
         
         # Drop database if it exists
-        if psql -lqt | cut -d \| -f 1 | grep -qw "$DB_NAME" 2>/dev/null; then
+        if sudo -u postgres psql -lqt | cut -d \| -f 1 | grep -qw "$DB_NAME" 2>/dev/null; then
             print_info "Dropping existing database: $DB_NAME"
-            psql postgres -c "DROP DATABASE IF EXISTS $DB_NAME;" 2>/dev/null || true
+            sudo -u postgres psql -c "DROP DATABASE IF EXISTS $DB_NAME;" 2>/dev/null || true
             print_status "Database dropped"
         fi
         
@@ -405,32 +410,36 @@ start_services() {
     fi
     
     # Check if database exists, create if not
-    if ! psql -lqt | cut -d \| -f 1 | grep -qw "$DB_NAME" 2>/dev/null; then
+    if ! sudo -u postgres psql -lqt | cut -d \| -f 1 | grep -qw "$DB_NAME" 2>/dev/null; then
         print_info "Creating PostgreSQL database and user..."
         
         # Create user and database
-        psql postgres -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASSWORD';" 2>/dev/null || true
-        psql postgres -c "ALTER USER $DB_USER CREATEDB;" 2>/dev/null || true
-        psql postgres -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" 2>/dev/null || true
-        psql postgres -c "GRANT ALL PRIVILEGES ON DATABASE $DB_NAME TO $DB_USER;" 2>/dev/null || true
+        sudo -u postgres psql -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASSWORD';" 2>/dev/null || true
+        sudo -u postgres psql -c "ALTER USER $DB_USER CREATEDB;" 2>/dev/null || true
+        sudo -u postgres psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" 2>/dev/null || true
+        sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE $DB_NAME TO $DB_USER;" 2>/dev/null || true
         
         print_status "PostgreSQL database and user created"
     else
         print_status "PostgreSQL database already exists"
     fi
     
-    # Run Django migrations
+    # Generate and run Django migrations
+    print_info "Generating migration files for any model changes..."
+    python manage.py makemigrations >/dev/null 2>&1
+    print_status "Migration files generated"
+    
     print_info "Running Django migrations..."
     python manage.py migrate >/dev/null 2>&1
     show_progress 6 11 "Migrations completed"
     print_status "Database migrations completed"
     
-    # Create superuser if it doesn't exist
+    # Create superuser if it doesn't exist (credentials already loaded from .env above)
     print_info "Checking for superuser..."
     if ! python manage.py shell -c "from django.contrib.auth import get_user_model; User = get_user_model(); print('exists' if User.objects.filter(is_superuser=True).exists() else 'missing')" 2>/dev/null | grep -q "exists"; then
-        print_info "Creating superuser (admin/admin)..."
-        echo "from django.contrib.auth import get_user_model; User = get_user_model(); User.objects.create_superuser('admin', 'admin@example.com', 'admin')" | python manage.py shell >/dev/null 2>&1
-        print_status "Superuser created (username: admin, password: admin)"
+        print_info "Creating superuser (${ADMIN_USERNAME})..."
+        echo "from django.contrib.auth import get_user_model; User = get_user_model(); User.objects.create_superuser('${ADMIN_USERNAME}', '${ADMIN_EMAIL}', '${ADMIN_PASSWORD}')" | python manage.py shell >/dev/null 2>&1
+        print_status "Superuser created (username: ${ADMIN_USERNAME})"
     else
         print_status "Superuser already exists"
     fi
@@ -528,32 +537,48 @@ except Exception as e:
     
     show_progress 7 11 "GCS setup completed"
     
-    # Initialize master data tables if they don't exist
-    print_info "Checking master data tables..."
+    # Check master data status (without automatic initialization)
+    print_info "Checking master data status..."
     
-    # Check if master data exists
+    # Check if master data exists - IMPROVED VERSION with better error handling
     MASTER_DATA_EXISTS=$(python manage.py shell --no-startup -c "
-from services.questions.models import QuestionMasterData, Session, LokSabha, ParliamentInstitution
-from services.debates.models import DebateMasterData
 import sys
 import os
 os.environ['DJANGO_COLORS'] = 'nocolor'
 
-# Count LS sessions (sessions linked to LokSabha)
-ls_sessions = Session.objects.filter(lok_sabha__isnull=False).count()
-
-# Count RS sessions (for now, we'll count RS session numbers from questions/debates metadata)
-# RS doesn't use the Session model the same way, so we count unique session numbers from data
-rs_questions = QuestionMasterData.objects.filter(parent_institution__name='rajya_sabha').count() if ParliamentInstitution.objects.filter(name='rajya_sabha').exists() else 0
-rs_sessions = QuestionMasterData.objects.filter(parent_institution__name='rajya_sabha').values('session_number').distinct().count() if ParliamentInstitution.objects.filter(name='rajya_sabha').exists() else 0
-
-ls_questions = QuestionMasterData.objects.filter(parent_institution__name='lok_sabha').count() if ParliamentInstitution.objects.filter(name='lok_sabha').exists() else 0
-ls_debates = DebateMasterData.objects.filter(parent_institution__name='lok_sabha').count() if ParliamentInstitution.objects.filter(name='lok_sabha').exists() else 0
-
-print(f'{ls_sessions},{rs_sessions},{ls_questions},{rs_questions},{ls_debates}')
-" 2>&1 | grep -E '^[0-9,]+$')
+try:
+    from services.questions.models import QuestionMasterData, Session, LokSabha, ParliamentInstitution
+    from services.debates.models import DebateMasterData
     
-    IFS=',' read -r LS_SESSIONS RS_SESSIONS LS_QUESTIONS RS_QUESTIONS LS_DEBATES <<< "$MASTER_DATA_EXISTS"
+    # Count LS sessions (sessions linked to actual numbered LokSabha, NOT 'RS')
+    ls_sessions = Session.objects.filter(lok_sabha__isnull=False).exclude(lok_sabha__number='RS').count()
+    
+    # Count RS sessions (RS uses 'RS' as LokSabha number)
+    rs_lok_sabha = LokSabha.objects.filter(number='RS').first()
+    rs_sessions = Session.objects.filter(lok_sabha=rs_lok_sabha).count() if rs_lok_sabha else 0
+    
+    # Count questions by institution
+    ls_inst = ParliamentInstitution.objects.filter(name='lok_sabha').first()
+    rs_inst = ParliamentInstitution.objects.filter(name='rajya_sabha').first()
+    
+    ls_questions = QuestionMasterData.objects.filter(parent_institution=ls_inst).count() if ls_inst else 0
+    rs_questions = QuestionMasterData.objects.filter(parent_institution=rs_inst).count() if rs_inst else 0
+    
+    # Count debate master data by institution
+    ls_debates = DebateMasterData.objects.filter(parent_institution=ls_inst).count() if ls_inst else 0
+    rs_debates = DebateMasterData.objects.filter(parent_institution=rs_inst).count() if rs_inst else 0
+    
+    # Output as CSV - ONLY this line will be parsed
+    print(f'{ls_sessions},{rs_sessions},{ls_questions},{rs_questions},{ls_debates},{rs_debates}', flush=True)
+    
+except Exception as e:
+    # Output error as CSV with zeros
+    print(f'0,0,0,0,0,0', flush=True)
+    print(f'ERROR: {str(e)}', file=sys.stderr)
+" 2>&1 | tail -1)
+    
+    # Parse the CSV output (now includes rs_debates)
+    IFS=',' read -r LS_SESSIONS RS_SESSIONS LS_QUESTIONS RS_QUESTIONS LS_DEBATES RS_DEBATES <<< "$MASTER_DATA_EXISTS"
     
     # Provide defaults if variables are empty
     LS_SESSIONS=${LS_SESSIONS:-0}
@@ -561,104 +586,26 @@ print(f'{ls_sessions},{rs_sessions},{ls_questions},{rs_questions},{ls_debates}')
     LS_QUESTIONS=${LS_QUESTIONS:-0}
     RS_QUESTIONS=${RS_QUESTIONS:-0}
     LS_DEBATES=${LS_DEBATES:-0}
+    RS_DEBATES=${RS_DEBATES:-0}
     
-    # Check if we need to initialize any data
-    NEEDS_INIT=false
-    if [ "$LS_SESSIONS" -eq "0" ] || [ "$RS_SESSIONS" -eq "0" ] || [ "$LS_QUESTIONS" -eq "0" ] || [ "$RS_QUESTIONS" -eq "0" ] || [ "$LS_DEBATES" -eq "0" ]; then
-        NEEDS_INIT=true
-    fi
+    # Display current master data status
+    print_status "Master data status:"
+    print_info "   • LS Sessions: $LS_SESSIONS"
+    print_info "   • RS Sessions: $RS_SESSIONS"
+    print_info "   • LS Questions: $LS_QUESTIONS"
+    print_info "   • RS Questions: $RS_QUESTIONS"
+    print_info "   • LS Debates: $LS_DEBATES"
+    print_info "   • RS Debates: $RS_DEBATES"
     
-    if [ "$NEEDS_INIT" = true ]; then
-        print_warning "Master data tables are incomplete, initializing missing data..."
-        print_info "This will fetch data from Parliament APIs (may take 10-15 minutes)..."
-        
-        # Initialize questions master data (includes sessions, LS and RS questions)
-        if [ "$LS_SESSIONS" -eq "0" ] || [ "$RS_SESSIONS" -eq "0" ] || [ "$LS_QUESTIONS" -eq "0" ] || [ "$RS_QUESTIONS" -eq "0" ]; then
-            print_info "Initializing Questions Master Data (LS + RS)..."
-            print_info "   Current state:"
-            print_info "      • LS Sessions: $LS_SESSIONS"
-            print_info "      • RS Sessions: $RS_SESSIONS"
-            print_info "      • LS Questions: $LS_QUESTIONS"
-            print_info "      • RS Questions: $RS_QUESTIONS"
-            print_warning "   This will take 10-15 minutes - showing real-time progress..."
-            echo ""
-            
-            # Fetch COMPLETE dataset with parallel workers - SHOW REAL-TIME OUTPUT
-            python manage.py initialize_questions_master_data --workers 10 2>&1 | while IFS= read -r line; do
-                echo "      $line"
-            done
-            
-            print_status "Questions master data initialized (LS + RS)"
-        fi
-        
-        # Initialize LS debates master data
-        if [ "$LS_DEBATES" -eq "0" ]; then
-            print_info "Initializing LS Debates Master Data..."
-            print_warning "   Fetching debate dates from Parliament APIs..."
-            echo ""
-            
-            python manage.py initialize_debates_master_data 2>&1 | while IFS= read -r line; do
-                echo "      $line"
-            done
-            
-            print_status "LS Debates master data initialized"
-        fi
-        
-        # Initialize RS debates master data (NEW)
-        print_info "Initializing RS Debates Master Data..."
-        print_info "   This includes BOTH verbatim and official debates..."
-        print_warning "   Processing recent 5 sessions (verbatim) + 10 sessions (official)..."
-        echo ""
-        
-        python manage.py initialize_rs_debates_master_data --workers 10 --recent-sessions 5 --official-sessions 10 2>&1 | while IFS= read -r line; do
-            echo "      $line"
-        done
-        
-        print_status "RS Debates master data initialized"
-        
-        # Re-check counts after initialization
-        FINAL_COUNT=$(python manage.py shell --no-startup -c "
-from services.questions.models import QuestionMasterData, Session, ParliamentInstitution
-from services.debates.models import DebateMasterData
-import os
-os.environ['DJANGO_COLORS'] = 'nocolor'
-
-ls_sessions = Session.objects.filter(lok_sabha__isnull=False).count()
-rs_sessions = QuestionMasterData.objects.filter(parent_institution__name='rajya_sabha').values('session_number').distinct().count() if ParliamentInstitution.objects.filter(name='rajya_sabha').exists() else 0
-
-ls_questions = QuestionMasterData.objects.filter(parent_institution__name='lok_sabha').count() if ParliamentInstitution.objects.filter(name='lok_sabha').exists() else 0
-rs_questions = QuestionMasterData.objects.filter(parent_institution__name='rajya_sabha').count() if ParliamentInstitution.objects.filter(name='rajya_sabha').exists() else 0
-
-ls_debates = DebateMasterData.objects.filter(parent_institution__name='lok_sabha').count() if ParliamentInstitution.objects.filter(name='lok_sabha').exists() else 0
-
-print(f'{ls_sessions},{rs_sessions},{ls_questions},{rs_questions},{ls_debates}')
-" 2>&1 | grep -E '^[0-9,]+$')
-        
-        IFS=',' read -r FINAL_LS_SESSIONS FINAL_RS_SESSIONS FINAL_LS_QUESTIONS FINAL_RS_QUESTIONS FINAL_LS_DEBATES <<< "$FINAL_COUNT"
-        print_status "Master data initialization completed"
-        print_info "   • LS Sessions: ${FINAL_LS_SESSIONS:-0}"
-        print_info "   • RS Sessions: ${FINAL_RS_SESSIONS:-0}"
-        print_info "   • LS Questions: ${FINAL_LS_QUESTIONS:-0}"
-        print_info "   • RS Questions: ${FINAL_RS_QUESTIONS:-0}"
-        print_info "   • LS Debates: ${FINAL_LS_DEBATES:-0}"
-        print_info "   • RS Debates: Metadata initialized (verbatim + official)"
+    # Only show initialization instructions if data is missing
+    if [ "$LS_SESSIONS" -eq "0" ] || [ "$RS_SESSIONS" -eq "0" ] || [ "$LS_QUESTIONS" -eq "0" ] || [ "$RS_QUESTIONS" -eq "0" ] || [ "$LS_DEBATES" -eq "0" ] || [ "$RS_DEBATES" -eq "0" ]; then
+        print_warning "Some master data is missing. To initialize data manually, run:"
+        print_info "   python manage.py initialize_questions_master_data"
+        print_info "   python manage.py initialize_debates_master_data"
+        print_info "   python manage.py initialize_rs_debates_master_data"
+        print_info "   (Note: These commands may take 10-15 minutes and require stable internet)"
     else
-        print_status "Master data already initialized"
-        print_info "   • LS Sessions: $LS_SESSIONS"
-        print_info "   • RS Sessions: $RS_SESSIONS"
-        print_info "   • LS Questions: $LS_QUESTIONS"
-        print_info "   • RS Questions: $RS_QUESTIONS"
-        print_info "   • LS Debates: $LS_DEBATES"
-        print_info "   • RS Debates: Will be checked and initialized if needed"
-        
-        # Still run RS debates initialization to ensure it's up to date (idempotent)
-        print_info "Checking RS Debates Master Data (quick check)..."
-        python manage.py initialize_rs_debates_master_data --workers 10 --recent-sessions 2 --official-sessions 5 2>&1 | while IFS= read -r line; do
-            # Only show summary lines (lines starting with special chars or containing key info)
-            if [[ "$line" =~ ^[[:space:]]*(Status:|Sessions:|Dates:|Debates:|✓|✅|❌|⚠|ℹ|═|─) ]] || [[ "$line" =~ (RESULTS|SUMMARY|Complete) ]]; then
-                echo "      $line"
-            fi
-        done
+        print_status "Master data appears to be complete"
     fi
     
     show_progress 8 11 "Master data setup completed"
@@ -741,8 +688,9 @@ print(f'{ls_sessions},{rs_sessions},{ls_questions},{rs_questions},{ls_debates}')
     echo -e "  ${YELLOW}Restart:${NC}          ./startup.sh restart"
     echo -e "  ${YELLOW}Status:${NC}           ./startup.sh status"
     
-    echo -e "\n${WHITE}Default Credentials:${NC}"
-    echo -e "  ${YELLOW}Admin:${NC}            admin / admin"
+    echo -e "\n${WHITE}Admin Credentials:${NC}"
+    echo -e "  ${YELLOW}Username:${NC}         ${ADMIN_USERNAME}"
+    echo -e "  ${YELLOW}Password:${NC}         ${ADMIN_PASSWORD}"
     
     echo -e "\n${GREEN}🚀 Parliament API is ready to use!${NC}\n"
     

@@ -66,6 +66,9 @@ class Debate(models.Model):
     # API Response Data
     raw_api_data = models.JSONField(default=dict, blank=True)
     
+    # Metadata hash for duplicate detection
+    metadata_hash = models.CharField(max_length=64, blank=True, default='', db_index=True, help_text='Hash of metadata for duplicate detection')
+    
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -182,6 +185,7 @@ class DebateMasterData(models.Model):
     # API source information
     api_source = models.CharField(max_length=100, default='sansad.in', help_text='Primary API source used to fetch this data')
     fallback_api_sources = models.JSONField(default=list, help_text='List of fallback API sources used')
+    debate_category = models.CharField(max_length=50, default='corrected', help_text='Debate category: corrected, uncorrected, verbatim, official')
     
     # Data completeness
     is_complete = models.BooleanField(default=False, help_text='Whether all available debates for this session have been discovered')
@@ -191,13 +195,16 @@ class DebateMasterData(models.Model):
     # Raw API data
     raw_api_data = models.JSONField(default=dict, blank=True, help_text='Raw response from the API')
     
+    # Metadata hash for duplicate detection
+    metadata_hash = models.CharField(max_length=64, blank=True, default='', db_index=True, help_text='Hash of metadata for duplicate detection')
+    
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     last_fetched = models.DateTimeField(auto_now=True)
     
     class Meta:
-        unique_together = ['parent_institution', 'lok_sabha_number', 'session_number']
+        unique_together = ['parent_institution', 'lok_sabha_number', 'session_number', 'debate_category']
         ordering = ['-lok_sabha_number', '-session_number']
         indexes = [
             models.Index(fields=['parent_institution', 'lok_sabha_number', 'session_number']),

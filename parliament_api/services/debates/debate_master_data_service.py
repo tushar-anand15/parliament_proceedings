@@ -127,8 +127,8 @@ class DebateMasterDataService:
             Dict with overall statistics
         """
         try:
-            # Get all sessions from database
-            all_sessions = list(Session.objects.all().order_by('lok_sabha__number', 'session_number'))
+            # Get all LS sessions from database (EXCLUDE RS sessions!)
+            all_sessions = list(Session.objects.exclude(lok_sabha__number='RS').order_by('lok_sabha__number', 'session_number'))
             
             total_sessions = len(all_sessions)
             processed_sessions = 0
@@ -136,7 +136,7 @@ class DebateMasterDataService:
             total_updated = 0
             errors = []
             
-            print(f"📊 Processing {total_sessions} sessions for corrected debate dates with {workers} parallel workers...")
+            print(f"📊 Processing {total_sessions} LS sessions for corrected debate dates with {workers} parallel workers...")
             
             # Process sessions in parallel
             with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -192,11 +192,9 @@ class DebateMasterDataService:
         """
         for attempt in range(max_retries):
             try:
-                # Add randomized delay (0.2-0.5 seconds) to avoid overwhelming API
-                if attempt == 0:
-                    random_delay = random.uniform(0.2, 0.5)
-                    time.sleep(random_delay)
-                elif attempt > 0:
+                # No delay on first attempt for metadata fetching
+                # Only exponential backoff on retries
+                if attempt > 0:
                     # Exponential backoff on retries
                     delay = min(2 ** attempt, 60)
                     time.sleep(delay)
@@ -277,8 +275,20 @@ class DebateMasterDataService:
                 except Exception as e:
                     logger.warning(f"Failed to parse date range: {e}")
             
+            # Get or create Lok Sabha institution
+            from services.questions.models import ParliamentInstitution
+            ls_institution, _ = ParliamentInstitution.objects.get_or_create(
+                name='lok_sabha',
+                defaults={
+                    'full_name': 'Lok Sabha',
+                    'description': 'Lower House of Parliament of India',
+                    'is_active': True
+                }
+            )
+            
             # Store or update master data
             master_data = {
+                'parent_institution': ls_institution,
                 'available_dates': available_dates,
                 'session_period': session_period,
                 'date_range_start': date_range_start,
@@ -295,8 +305,9 @@ class DebateMasterDataService:
                 'last_fetched': timezone.now()
             }
             
-            # Create or update master data
-            debate_master, created = DebateMasterData.objects.get_or_create(
+            # Create or update master data (using proper unique constraint fields)
+            debate_master, created = DebateMasterData.objects.update_or_create(
+                parent_institution=ls_institution,
                 lok_sabha_number=lok_sabha_number,
                 session_number=session_number,
                 defaults=master_data

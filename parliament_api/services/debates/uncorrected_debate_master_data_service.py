@@ -254,13 +254,29 @@ class UncorrectedDebateMasterDataService:
                 'last_fetched': timezone.now()
             }
             
-            # Create or update master data with unique constraint including debate_category
-            debate_master, created = DebateMasterData.objects.update_or_create(
+            # Get or create LS institution
+            from services.questions.models import ParliamentInstitution
+            ls_institution, _ = ParliamentInstitution.objects.get_or_create(
+                name='lok_sabha',
+                defaults={'full_name': 'Lok Sabha', 'is_active': True}
+            )
+            
+            # MERGE with existing corrected debate data (don't overwrite!)
+            debate_master, created = DebateMasterData.objects.get_or_create(
+                parent_institution=ls_institution,
                 lok_sabha_number=lok_sabha_number,
                 session_number=session_number,
-                # Add debate_category to make it unique from corrected debates
                 defaults=master_data
             )
+            
+            # If not created, MERGE uncorrected data with existing corrected data
+            if not created:
+                existing_raw = debate_master.raw_api_data or {}
+                debate_master.raw_api_data = {
+                    **existing_raw,  # Keep corrected data
+                    'uncorrected': master_data['raw_api_data'],  # Add uncorrected data
+                }
+                debate_master.save()
             
             # Store debate category in raw_api_data to differentiate
             if not created:
@@ -306,7 +322,7 @@ class UncorrectedDebateMasterDataService:
         """
         try:
             # Get all sessions from database
-            all_sessions = list(Session.objects.all().order_by('lok_sabha__number', 'session_number'))
+            all_sessions = list(Session.objects.exclude(lok_sabha__number='RS').order_by('lok_sabha__number', 'session_number'))
             
             total_sessions = len(all_sessions)
             processed_sessions = 0
@@ -378,11 +394,9 @@ class UncorrectedDebateMasterDataService:
         """
         for attempt in range(max_retries):
             try:
-                # Add randomized delay (0.2-0.5 seconds) to avoid overwhelming API
-                if attempt == 0:
-                    random_delay = random.uniform(0.2, 0.5)
-                    time.sleep(random_delay)
-                elif attempt > 0:
+                # No delay on first attempt for metadata fetching
+                # Only exponential backoff on retries
+                if attempt > 0:
                     # Exponential backoff on retries
                     delay = min(2 ** attempt, 60)
                     time.sleep(delay)

@@ -8,6 +8,7 @@ from django.db import transaction
 from django.conf import settings
 
 from .models import QuestionMasterData, LokSabha, Session
+from services.utils.metadata_hash import generate_question_metadata_hash
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,17 @@ class QuestionMasterDataService:
     
     def __init__(self):
         self.session = requests.Session()
+        
+        # Increase connection pool size for parallel pagination
+        # 10 session workers × 5 page workers = 50 concurrent connections needed
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=100,
+            pool_maxsize=100,
+            max_retries=3
+        )
+        self.session.mount('http://', adapter)
+        self.session.mount('https://', adapter)
+        
         # Set headers to mimic browser requests
         self.session.headers.update({
             'Accept': 'application/json, text/plain, */*',
@@ -166,22 +178,23 @@ class QuestionMasterDataService:
             raise
     
     def fetch_questions_for_session(self, lok_sabha_number: str, session_number: str, 
-                                  page_size: int = 10000, use_fallback: bool = True, timeout: int = 60) -> Dict:
+                                  page_size: int = 500, use_fallback: bool = True, timeout: int = 60) -> Dict:
         """
-        Fetch all questions for a specific Lok Sabha session
+        Fetch all questions for a specific Lok Sabha session using pagination
         
         Args:
             lok_sabha_number: Lok Sabha number (e.g., '18')
             session_number: Session number (e.g., '5')
-            page_size: Maximum records to fetch (default 10000 to get all)
+            page_size: Records per page (default 500 for optimal speed)
             
         Returns:
             Dict with questions data and statistics
         """
         try:
+            # First request to get total count
             url = f"https://sansad.in/api_ls/question/qetFilteredQuestionsAns?loksabhaNo={lok_sabha_number}&sessionNumber={session_number}&pageNo=1&locale=en&pageSize={page_size}"
             
-            logger.info(f"Fetching questions for LS{lok_sabha_number} Session{session_number} from: {url}")
+            logger.info(f"Fetching questions for LS{lok_sabha_number} Session{session_number} (page 1)")
             response = self.session.get(url, timeout=timeout)
             response.raise_for_status()
             
@@ -190,76 +203,177 @@ class QuestionMasterDataService:
             if not isinstance(data, list) or not data:
                 raise ValueError("Expected non-empty list response from API")
             
-            questions_data = data[0].get('listOfQuestions', [])
-            total_record_size = data[0].get('totalRecordSize', len(questions_data))
+            first_page_questions = data[0].get('listOfQuestions', [])
+            total_record_size = data[0].get('totalRecordSize', len(first_page_questions))
+            
+            # Calculate total pages needed
+            total_pages = (total_record_size + page_size - 1) // page_size  # Ceiling division
+            
+            # Collect all questions starting with first page
+            all_questions = first_page_questions.copy()
+            
+            # Fetch remaining pages in parallel if needed
+            if total_pages > 1:
+                logger.info(f"Fetching {total_pages - 1} additional pages for LS{lok_sabha_number} Session{session_number}")
+                
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                import time
+                import random
+                
+                with ThreadPoolExecutor(max_workers=min(5, total_pages - 1)) as executor:
+                    # Submit requests for pages 2 to total_pages
+                    future_to_page = {}
+                    for page_no in range(2, total_pages + 1):
+                        future = executor.submit(
+                            self._fetch_single_page,
+                            lok_sabha_number,
+                            session_number,
+                            page_no,
+                            page_size,
+                            timeout
+                        )
+                        future_to_page[future] = page_no
+                    
+                    # Collect results as they complete
+                    for future in as_completed(future_to_page):
+                        page_no = future_to_page[future]
+                        try:
+                            page_questions = future.result()
+                            all_questions.extend(page_questions)
+                        except Exception as e:
+                            logger.warning(f"Failed to fetch page {page_no} for LS{lok_sabha_number} Session{session_number}: {e}")
+            
+            questions_data = all_questions
+            logger.info(f"Fetched {len(questions_data)} total questions for LS{lok_sabha_number} Session{session_number}")
             
             # Get or create LokSabha and Session objects
             lok_sabha = LokSabha.objects.get(number=lok_sabha_number)
             session = Session.objects.get(lok_sabha=lok_sabha, session_number=session_number)
             
-            # Store questions in database
-            created_count = 0
-            updated_count = 0
+            # Get or create Lok Sabha institution
+            from services.questions.models import ParliamentInstitution
+            ls_institution, _ = ParliamentInstitution.objects.get_or_create(
+                name='lok_sabha',
+                defaults={
+                    'full_name': 'Lok Sabha',
+                    'description': 'Lower House of Parliament of India',
+                    'is_active': True
+                }
+            )
             
+            # Store questions in database using BULK operations
+            # Use metadata hash to identify true duplicates
+            existing_questions_qs = QuestionMasterData.objects.filter(
+                parent_institution=ls_institution,
+                lok_sabha_number=lok_sabha_number,
+                session_number=session_number
+            )
+            # Build lookup dict - use composite key as fallback since metadata_hash might not exist in old records
+            existing_questions = {}
+            for q in existing_questions_qs:
+                # Composite key: question_number + question_type (for matching)
+                key = f"{q.question_number}_{q.question_type}"
+                existing_questions[key] = q
+            
+            questions_to_create = []
+            questions_to_update = []
+            
+            for q_data in questions_data:
+                question_number = str(q_data.get('quesNo', ''))
+                if not question_number:
+                    continue
+                
+                # Parse date
+                question_date = None
+                date_str = q_data.get('date', '')
+                if date_str:
+                    try:
+                        question_date = datetime.strptime(date_str, '%d.%m.%Y').date()
+                    except ValueError:
+                        logger.warning(f"Failed to parse date '{date_str}' for question {question_number}")
+                
+                # Clean and normalize question type
+                raw_question_type = q_data.get('type') or 'STARRED'
+                clean_question_type = self._clean_question_type(raw_question_type)
+                
+                # Generate metadata hash for this question
+                metadata_for_hash = {
+                    'question_number': question_number,
+                    'question_type': clean_question_type,
+                    'lok_sabha_number': lok_sabha_number,
+                    'session_number': session_number,
+                    'subjects': q_data.get('subjects') or '',
+                    'ministry': q_data.get('ministry') or '',
+                    'date': question_date.isoformat() if question_date else '',
+                    'questions_file_path': q_data.get('questionsFilePath') or '',
+                    'questions_file_path_hindi': q_data.get('questionsFilePathHindi') or '',
+                }
+                metadata_hash = generate_question_metadata_hash(metadata_for_hash)
+                
+                # Create question object
+                question_obj = QuestionMasterData(
+                    parent_institution=ls_institution,
+                    question_number=question_number,
+                    subjects=q_data.get('subjects') or '',
+                    lok_sabha_number=lok_sabha_number,
+                    members=q_data.get('member') or [],
+                    ministry=q_data.get('ministry') or '',
+                    question_type=clean_question_type,
+                    date=question_date,
+                    session_number=session_number,
+                    questions_file_path=q_data.get('questionsFilePath') or '',
+                    questions_file_path_hindi=q_data.get('questionsFilePathHindi') or '',
+                    question_text=q_data.get('questionText'),
+                    answer_text=q_data.get('answerText'),
+                    answer_text_hindi=q_data.get('answerTextHindi'),
+                    supplementary_type=q_data.get('supplementaryType') or False,
+                    supplementary_questions=q_data.get('supplementaryQuestionResDtoList') or [],
+                    lok_sabha=lok_sabha,
+                    session=session,
+                    raw_api_data=q_data,
+                    last_fetched=timezone.now(),
+                    metadata_hash=metadata_hash  # Add hash for duplicate detection
+                )
+                
+                # Check using composite key: question_number + question_type
+                lookup_key = f"{question_number}_{clean_question_type}"
+                if lookup_key in existing_questions:
+                    # Update existing (same question_number + question_type in same session)
+                    question_obj.id = existing_questions[lookup_key].id
+                    questions_to_update.append(question_obj)
+                else:
+                    # New question
+                    questions_to_create.append(question_obj)
+            
+            # Bulk create and update in a single transaction
             with transaction.atomic():
-                for q_data in questions_data:
-                    question_number = str(q_data.get('quesNo', ''))
-                    if not question_number:
-                        continue
-                    
-                    # Parse date
-                    question_date = None
-                    date_str = q_data.get('date', '')
-                    if date_str:
-                        try:
-                            question_date = datetime.strptime(date_str, '%d.%m.%Y').date()
-                        except ValueError:
-                            logger.warning(f"Failed to parse date '{date_str}' for question {question_number}")
-                    
-                    # Clean and normalize question type
-                    raw_question_type = q_data.get('type') or 'STARRED'
-                    clean_question_type = self._clean_question_type(raw_question_type)
-                    
-                    # Prepare master data with safe null handling
-                    master_data = {
-                        'question_number': question_number,
-                        'subjects': q_data.get('subjects') or '',
-                        'lok_sabha_number': lok_sabha_number,
-                        'members': q_data.get('member') or [],
-                        'ministry': q_data.get('ministry') or '',
-                        'question_type': clean_question_type,
-                        'date': question_date,
-                        'session_number': session_number,
-                        'questions_file_path': q_data.get('questionsFilePath') or '',
-                        'questions_file_path_hindi': q_data.get('questionsFilePathHindi') or '',
-                        'question_text': q_data.get('questionText'),  # Allow None
-                        'answer_text': q_data.get('answerText'),  # Allow None
-                        'answer_text_hindi': q_data.get('answerTextHindi'),  # Allow None
-                        'supplementary_type': q_data.get('supplementaryType') or False,
-                        'supplementary_questions': q_data.get('supplementaryQuestionResDtoList') or [],
-                        'lok_sabha': lok_sabha,
-                        'session': session,
-                        'raw_api_data': q_data,
-                        'last_fetched': timezone.now()
-                    }
-                    
-                    # Create or update master data
-                    question_master, created = QuestionMasterData.objects.get_or_create(
-                        question_number=question_number,
-                        lok_sabha_number=lok_sabha_number,
-                        session_number=session_number,
-                        defaults=master_data
+                created_count = 0
+                updated_count = 0
+                
+                if questions_to_create:
+                    # DEFENSE IN DEPTH: ignore_conflicts=True as safety net
+                    # Primary protection: Worker deduplication in management command
+                    # Secondary protection: This flag handles edge cases (multiple command invocations, etc.)
+                    created_objects = QuestionMasterData.objects.bulk_create(
+                        questions_to_create, 
+                        batch_size=1000,
+                        ignore_conflicts=True
                     )
-                    
-                    if created:
-                        created_count += 1
-                    else:
-                        # Update existing record
-                        for key, value in master_data.items():
-                            if key not in ['question_number', 'lok_sabha_number', 'session_number']:
-                                setattr(question_master, key, value)
-                        question_master.save()
-                        updated_count += 1
+                    created_count = len(created_objects)
+                
+                if questions_to_update:
+                    QuestionMasterData.objects.bulk_update(
+                        questions_to_update,
+                        fields=[
+                            'parent_institution', 'subjects', 'members', 'ministry', 
+                            'question_type', 'date', 'questions_file_path', 
+                            'questions_file_path_hindi', 'question_text', 'answer_text',
+                            'answer_text_hindi', 'supplementary_type', 'supplementary_questions',
+                            'lok_sabha', 'session', 'raw_api_data', 'last_fetched', 'metadata_hash'
+                        ],
+                        batch_size=1000
+                    )
+                    updated_count = len(questions_to_update)
             
             result = {
                 'status': 'SUCCESS',
@@ -294,9 +408,9 @@ class QuestionMasterDataService:
                 logger.error(f"Failed to fetch questions for LS{lok_sabha_number} Session{session_number}: {e}")
                 raise
     
-    def _fetch_questions_legacy_api(self, lok_sabha_number: str, session_number: str, page_size: int = 5000, timeout: int = 60) -> Dict:
+    def _fetch_questions_legacy_api(self, lok_sabha_number: str, session_number: str, page_size: int = 500, timeout: int = 60) -> Dict:
         """
-        Fetch questions using the legacy eparlib.sansad.in API
+        Fetch questions using the legacy eparlib.sansad.in API WITH FULL PAGINATION
         """
         try:
             # Convert session number to Roman if it's numeric
@@ -305,9 +419,10 @@ class QuestionMasterDataService:
             # Format Lok Sabha number with leading zero for legacy API
             formatted_lok_sabha = lok_sabha_number.zfill(2)
             
+            # FIRST PAGE: Get total count
             url = f"https://eparlib.sansad.in/restv3/fetch/all?collectionId=3&start=0&rows={page_size}&loksabhaNo={formatted_lok_sabha}&sessionNo={roman_session}"
             
-            logger.info(f"Fetching questions from legacy API: {url}")
+            logger.info(f"Fetching questions from legacy API (page 1): {url}")
             response = self.session.get(url, timeout=timeout)
             response.raise_for_status()
             
@@ -316,21 +431,77 @@ class QuestionMasterDataService:
             if data.get('statusCode') != '200':
                 raise ValueError(f"Legacy API returned error: {data.get('message', 'Unknown error')}")
             
-            questions_data = data.get('records', [])
-            total_record_size = int(data.get('rowsCount', len(questions_data)))
+            all_questions = data.get('records', [])
+            total_record_size = int(data.get('rowsCount', len(all_questions)))
             
-            if not questions_data:
+            if not all_questions:
                 raise ValueError(f"No questions found in legacy API for LS{lok_sabha_number} Session{session_number}")
+            
+            # PAGINATION: Fetch remaining pages
+            total_pages = (total_record_size + page_size - 1) // page_size
+            
+            if total_pages > 1:
+                logger.info(f"Legacy API: Need {total_pages} pages for {total_record_size} questions. Fetching {total_pages - 1} more pages...")
+                
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                
+                with ThreadPoolExecutor(max_workers=min(5, total_pages - 1)) as executor:
+                    futures = {}
+                    for page_no in range(1, total_pages):  # Pages 1, 2, 3... (start indices: 500, 1000, 1500...)
+                        start = page_no * page_size
+                        page_url = f"https://eparlib.sansad.in/restv3/fetch/all?collectionId=3&start={start}&rows={page_size}&loksabhaNo={formatted_lok_sabha}&sessionNo={roman_session}"
+                        
+                        future = executor.submit(self._fetch_legacy_page, page_url, start, timeout)
+                        futures[future] = page_no
+                    
+                    for future in as_completed(futures):
+                        page_no = futures[future]
+                        try:
+                            page_questions = future.result()
+                            all_questions.extend(page_questions)
+                        except Exception as e:
+                            logger.warning(f"Failed to fetch legacy API page {page_no + 1}: {e}")
+                
+                logger.info(f"Legacy API: Fetched {len(all_questions)}/{total_record_size} questions across {total_pages} pages")
             
             # Get or create LokSabha and Session objects
             lok_sabha = LokSabha.objects.get(number=lok_sabha_number)
             session = Session.objects.get(lok_sabha=lok_sabha, session_number=session_number)
             
-            return self._store_questions_from_legacy_api(questions_data, total_record_size, lok_sabha, session, lok_sabha_number, session_number)
+            return self._store_questions_from_legacy_api(all_questions, total_record_size, lok_sabha, session, lok_sabha_number, session_number)
             
         except Exception as e:
             logger.error(f"Legacy API failed for LS{lok_sabha_number} Session{session_number}: {e}")
             raise
+    
+    def _fetch_legacy_page(self, url: str, start: int, timeout: int) -> List:
+        """Fetch a single page from legacy API"""
+        response = self.session.get(url, timeout=timeout)
+        response.raise_for_status()
+        data = response.json()
+        
+        if data.get('statusCode') != '200':
+            raise ValueError(f"Legacy API error: {data.get('message')}")
+        
+        return data.get('records', [])
+    
+    def _fetch_single_page(self, lok_sabha_number: str, session_number: str, 
+                          page_no: int, page_size: int, timeout: int) -> List:
+        """
+        Fetch a single page of questions
+        
+        Returns:
+            List of question dictionaries
+        """
+        url = f"https://sansad.in/api_ls/question/qetFilteredQuestionsAns?loksabhaNo={lok_sabha_number}&sessionNumber={session_number}&pageNo={page_no}&locale=en&pageSize={page_size}"
+        
+        response = self.session.get(url, timeout=timeout)
+        response.raise_for_status()
+        
+        data = response.json()
+        if isinstance(data, list) and len(data) > 0:
+            return data[0].get('listOfQuestions', [])
+        return []
     
     def _convert_to_roman_session(self, session_number: str) -> str:
         """
@@ -383,79 +554,141 @@ class QuestionMasterDataService:
         """
         Store questions from legacy API response
         """
-        created_count = 0
-        updated_count = 0
+        # Get or create Lok Sabha institution
+        from services.questions.models import ParliamentInstitution
+        ls_institution, _ = ParliamentInstitution.objects.get_or_create(
+            name='lok_sabha',
+            defaults={
+                'full_name': 'Lok Sabha',
+                'description': 'Lower House of Parliament of India',
+                'is_active': True
+            }
+        )
         
-        with transaction.atomic():
-            for q_data in questions_data:
-                question_number = str(q_data.get('questionNo', ''))
-                if not question_number:
-                    continue
-                
-                # Parse date from legacy format (YYYY-MM-DD)
-                question_date = None
-                date_str = q_data.get('date', '')
-                if date_str:
-                    try:
-                        question_date = datetime.strptime(date_str, '%Y-%m-%d').date()
-                    except ValueError:
-                        logger.warning(f"Failed to parse legacy date '{date_str}' for question {question_number}")
-                
-                # Extract PDF URLs from files array and transform them
-                files = q_data.get('files', [])
-                pdf_url = self._transform_legacy_pdf_url(files[0]) if files else ''
-                pdf_url_hindi = ''
-                
-                # Look for Hindi PDF in files
-                for file_url in files:
-                    if 'hindi' in file_url.lower():
-                        pdf_url_hindi = self._transform_legacy_pdf_url(file_url)
-                        break
-                
+        # Get existing questions for bulk operations
+        # The ACTUAL unique constraint is: parent_institution + question_number + lok_sabha_number + session_number + question_type
+        existing_questions_qs = QuestionMasterData.objects.filter(
+            parent_institution=ls_institution,
+            lok_sabha_number=lok_sabha_number,
+            session_number=session_number
+        )
+        # Build lookup dict using the ACTUAL composite unique key
+        existing_questions = {}
+        for q in existing_questions_qs:
+            # Composite key: question_number + question_type
+            key = f"{q.question_number}_{q.question_type}"
+            existing_questions[key] = q
+        
+        questions_to_create = []
+        questions_to_update = []
+        
+        for q_data in questions_data:
+            question_number = str(q_data.get('questionNo', ''))
+            if not question_number:
+                continue
+            
+            # Parse date from legacy format (YYYY-MM-DD)
+            question_date = None
+            date_str = q_data.get('date', '')
+            if date_str:
+                try:
+                    # Strip extra spaces that may exist in legacy dates (e.g. '2001- 3-07')
+                    cleaned_date_str = date_str.replace(' ', '')
+                    question_date = datetime.strptime(cleaned_date_str, '%Y-%m-%d').date()
+                except ValueError:
+                    logger.warning(f"Failed to parse legacy date '{date_str}' for question {question_number}")
+            
+            # Extract PDF URLs from files array and transform them
+            files = q_data.get('files', [])
+            pdf_url = self._transform_legacy_pdf_url(files[0]) if files else ''
+            pdf_url_hindi = ''
+            
+            # Look for Hindi PDF in files
+            for file_url in files:
+                if 'hindi' in file_url.lower():
+                    pdf_url_hindi = self._transform_legacy_pdf_url(file_url)
+                    break
+            
                 # Convert and clean legacy question type
                 raw_question_type = q_data.get('questionType', 'Starred')
                 question_type = self._clean_question_type(raw_question_type)
                 
-                # Prepare master data for legacy API
-                master_data = {
+                # Generate metadata hash
+                metadata_for_hash = {
                     'question_number': question_number,
-                    'subjects': q_data.get('title') or '',
-                    'lok_sabha_number': lok_sabha_number,
-                    'members': q_data.get('members') or [],
-                    'ministry': ', '.join(q_data.get('ministry', [])) if q_data.get('ministry') else '',
                     'question_type': question_type,
-                    'date': question_date,
+                    'lok_sabha_number': lok_sabha_number,
                     'session_number': session_number,
+                    'subjects': q_data.get('title') or '',
+                    'ministry': ', '.join(q_data.get('ministry', [])) if q_data.get('ministry') else '',
+                    'date': question_date.isoformat() if question_date else '',
                     'questions_file_path': pdf_url,
                     'questions_file_path_hindi': pdf_url_hindi,
-                    'question_text': None,  # Legacy API doesn't have question text
-                    'answer_text': None,    # Legacy API doesn't have answer text
-                    'answer_text_hindi': None,
-                    'supplementary_type': False,
-                    'supplementary_questions': [],
-                    'lok_sabha': lok_sabha,
-                    'session': session,
-                    'raw_api_data': q_data,
-                    'last_fetched': timezone.now()
                 }
+                metadata_hash = generate_question_metadata_hash(metadata_for_hash)
                 
-                # Create or update master data
-                question_master, created = QuestionMasterData.objects.get_or_create(
-                    question_number=question_number,
-                    lok_sabha_number=lok_sabha_number,
-                    session_number=session_number,
-                    defaults=master_data
+                # Create question object
+                question_obj = QuestionMasterData(
+                parent_institution=ls_institution,
+                question_number=question_number,
+                subjects=q_data.get('title') or '',
+                lok_sabha_number=lok_sabha_number,
+                members=q_data.get('members') or [],
+                ministry=', '.join(q_data.get('ministry', [])) if q_data.get('ministry') else '',
+                question_type=question_type,
+                date=question_date,
+                session_number=session_number,
+                questions_file_path=pdf_url,
+                questions_file_path_hindi=pdf_url_hindi,
+                question_text=None,  # Legacy API doesn't have question text
+                answer_text=None,    # Legacy API doesn't have answer text
+                answer_text_hindi=None,
+                supplementary_type=False,
+                supplementary_questions=[],
+                    lok_sabha=lok_sabha,
+                    session=session,
+                    raw_api_data=q_data,
+                    last_fetched=timezone.now(),
+                    metadata_hash=metadata_hash
                 )
                 
-                if created:
-                    created_count += 1
+                # Check using composite key: question_number + question_type
+                lookup_key = f"{question_number}_{question_type}"
+                if lookup_key in existing_questions:
+                    question_obj.id = existing_questions[lookup_key].id
+                    questions_to_update.append(question_obj)
                 else:
-                    # Update existing record
-                    for key, value in master_data.items():
-                        if key not in ['question_number', 'lok_sabha_number', 'session_number']:
-                            setattr(question_master, key, value)
-                    question_master.save()
-                    updated_count += 1
+                    questions_to_create.append(question_obj)
+        
+        # Bulk create and update
+        with transaction.atomic():
+            created_count = 0
+            updated_count = 0
+            
+            if questions_to_create:
+                # DEFENSE IN DEPTH: ignore_conflicts=True as safety net
+                # Primary protection: Worker deduplication in management command
+                # Secondary protection: This flag handles edge cases (multiple command invocations, etc.)
+                created_objects = QuestionMasterData.objects.bulk_create(
+                    questions_to_create, 
+                    batch_size=1000,
+                    ignore_conflicts=True
+                )
+                created_count = len(created_objects)
+            
+            if questions_to_update:
+                QuestionMasterData.objects.bulk_update(
+                    questions_to_update,
+                    fields=[
+                        'parent_institution', 'subjects', 'members', 'ministry',
+                        'question_type', 'date', 'questions_file_path',
+                        'questions_file_path_hindi', 'question_text', 'answer_text',
+                        'answer_text_hindi', 'supplementary_type', 'supplementary_questions',
+                        'lok_sabha', 'session', 'raw_api_data', 'last_fetched', 'metadata_hash'
+                    ],
+                    batch_size=1000
+                )
+                updated_count = len(questions_to_update)
         
         result = {
             'status': 'SUCCESS',

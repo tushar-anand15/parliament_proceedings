@@ -8,6 +8,7 @@ from django.db import transaction
 from django.conf import settings
 
 from .models import QuestionMasterData, LokSabha, Session, ParliamentInstitution
+from services.utils.metadata_hash import generate_question_metadata_hash
 
 logger = logging.getLogger(__name__)
 
@@ -223,79 +224,122 @@ class RajyaSabhaMasterDataService:
             # Get or create ParliamentInstitution for Rajya Sabha
             rs_institution = ParliamentInstitution.objects.get(name='rajya_sabha')
             
-            # Store questions in database
-            created_count = 0
-            updated_count = 0
+            # Store questions in database using BULK operations
+            # Get existing questions (RS has composite key: question_number + session + question_type)
+            # Note: question_number alone is NOT unique
+            existing_questions_qs = QuestionMasterData.objects.filter(
+                rajya_sabha_number='RS',
+                session_number=session_number
+            )
+            existing_questions = {}
+            for q in existing_questions_qs:
+                key = f"{q.question_number}_{q.question_type}"
+                existing_questions[key] = q
             
+            questions_to_create = []
+            questions_to_update = []
+            
+            for q_data in questions_data:
+                question_number = str(q_data.get('qno', ''))
+                if not question_number:
+                    continue
+                
+                # Parse date from RS format (YYYY-MM-DD)
+                question_date = None
+                date_str = q_data.get('adate', '')  # Answer date
+                if date_str:
+                    try:
+                        # RS API returns ISO format: "2025-07-21T00:00:00"
+                        question_date = datetime.fromisoformat(date_str.replace('T00:00:00', '')).date()
+                    except ValueError:
+                        logger.warning(f"Failed to parse date '{date_str}' for RS question {question_number}")
+                
+                # Clean and normalize question type
+                raw_question_type = q_data.get('qtype', 'UNSTARRED').strip()
+                clean_question_type = self._clean_question_type(raw_question_type)
+                
+                # Extract member info (RS format is different)
+                member_name = q_data.get('name', '')
+                member_prefix = q_data.get('shri', '')
+                full_member_name = f"{member_prefix} {member_name}".strip()
+                
+                # Generate metadata hash
+                metadata_for_hash = {
+                    'question_number': question_number,
+                    'question_type': clean_question_type,
+                    'rajya_sabha_number': 'RS',
+                    'session_number': session_number,
+                    'subjects': q_data.get('qtitle', ''),
+                    'ministry': q_data.get('min_name', ''),
+                    'date': question_date.isoformat() if question_date else '',
+                    'questions_file_path': q_data.get('files') or '',
+                    'questions_file_path_hindi': q_data.get('hindifiles') or '',
+                }
+                metadata_hash = generate_question_metadata_hash(metadata_for_hash)
+                
+                # Create question object
+                question_obj = QuestionMasterData(
+                    parent_institution=rs_institution,
+                    question_number=question_number,
+                    subjects=q_data.get('qtitle', ''),
+                    rajya_sabha_number='RS',  # Use 'RS' identifier
+                    lok_sabha_number='',  # Empty for RS questions
+                    members=[{'name': full_member_name}] if full_member_name else [],
+                    ministry=q_data.get('min_name', ''),
+                    question_type=clean_question_type,
+                    date=question_date,
+                    session_number=session_number,
+                    questions_file_path=q_data.get('files') or '',  # Ensure not None
+                    questions_file_path_hindi=q_data.get('hindifiles') or '',  # Ensure not None
+                    question_text=q_data.get('qn_text', ''),  # RS provides question text
+                    answer_text=q_data.get('ans_text'),  # May be null
+                    answer_text_hindi=None,  # Not provided in RS API
+                    supplementary_type=False,  # RS API doesn't indicate this
+                    supplementary_questions=[],
+                    lok_sabha=rajya_sabha,
+                    session=session,
+                    raw_api_data=q_data,
+                    last_fetched=timezone.now(),
+                    metadata_hash=metadata_hash
+                )
+                
+                # Check if exists (unique on question_number + question_type for RS)
+                lookup_key = f"{question_number}_{clean_question_type}"
+                if lookup_key in existing_questions:
+                    question_obj.id = existing_questions[lookup_key].id
+                    questions_to_update.append(question_obj)
+                else:
+                    questions_to_create.append(question_obj)
+            
+            # Bulk create and update
             with transaction.atomic():
-                for q_data in questions_data:
-                    question_number = str(q_data.get('qno', ''))
-                    if not question_number:
-                        continue
-                    
-                    # Parse date from RS format (YYYY-MM-DD)
-                    question_date = None
-                    date_str = q_data.get('adate', '')  # Answer date
-                    if date_str:
-                        try:
-                            # RS API returns ISO format: "2025-07-21T00:00:00"
-                            question_date = datetime.fromisoformat(date_str.replace('T00:00:00', '')).date()
-                        except ValueError:
-                            logger.warning(f"Failed to parse date '{date_str}' for RS question {question_number}")
-                    
-                    # Clean and normalize question type
-                    raw_question_type = q_data.get('qtype', 'UNSTARRED').strip()
-                    clean_question_type = self._clean_question_type(raw_question_type)
-                    
-                    # Extract member info (RS format is different)
-                    member_name = q_data.get('name', '')
-                    member_prefix = q_data.get('shri', '')
-                    full_member_name = f"{member_prefix} {member_name}".strip()
-                    
-                    # Prepare master data for RS (handle null values properly)
-                    master_data = {
-                        'parent_institution': rs_institution,
-                        'question_number': question_number,
-                        'subjects': q_data.get('qtitle', ''),
-                        'rajya_sabha_number': 'RS',  # Use 'RS' identifier
-                        'lok_sabha_number': '',  # Empty for RS questions
-                        'members': [{'name': full_member_name}] if full_member_name else [],
-                        'ministry': q_data.get('min_name', ''),
-                        'question_type': clean_question_type,
-                        'date': question_date,
-                        'session_number': session_number,
-                        'questions_file_path': q_data.get('files') or '',  # Ensure not None
-                        'questions_file_path_hindi': q_data.get('hindifiles') or '',  # Ensure not None
-                        'question_text': q_data.get('qn_text', ''),  # RS provides question text
-                        'answer_text': q_data.get('ans_text'),  # May be null
-                        'answer_text_hindi': None,  # Not provided in RS API
-                        'supplementary_type': False,  # RS API doesn't indicate this
-                        'supplementary_questions': [],
-                        'lok_sabha': rajya_sabha,
-                        'session': session,
-                        'raw_api_data': q_data,
-                        'last_fetched': timezone.now()
-                    }
-                    
-                    # Create or update master data (now includes question_type in constraint)
-                    question_master, created = QuestionMasterData.objects.get_or_create(
-                        parent_institution=rs_institution,
-                        question_number=question_number,
-                        rajya_sabha_number='RS',
-                        session_number=session_number,
-                        question_type=clean_question_type,  # Include question_type in unique constraint
-                        defaults=master_data
+                created_count = 0
+                updated_count = 0
+                
+                if questions_to_create:
+                    # DEFENSE IN DEPTH: ignore_conflicts=True as safety net
+                    # Primary protection: Worker deduplication in management command
+                    # Secondary protection: This flag handles edge cases (multiple command invocations, etc.)
+                    created_objects = QuestionMasterData.objects.bulk_create(
+                        questions_to_create, 
+                        batch_size=1000,
+                        ignore_conflicts=True
                     )
-                    
-                    if created:
-                        created_count += 1
-                    else:
-                        # Update existing record
-                        for key, value in master_data.items():
-                            if key not in ['parent_institution', 'question_number', 'rajya_sabha_number', 'session_number']:
-                                setattr(question_master, key, value)
-                        question_master.save()
-                        updated_count += 1
+                    created_count = len(created_objects)
+                
+                if questions_to_update:
+                    QuestionMasterData.objects.bulk_update(
+                        questions_to_update,
+                        fields=[
+                            'parent_institution', 'subjects', 'members', 'ministry',
+                            'date', 'questions_file_path', 'questions_file_path_hindi',
+                            'question_text', 'answer_text', 'answer_text_hindi',
+                            'supplementary_type', 'supplementary_questions',
+                            'lok_sabha', 'session', 'raw_api_data', 'last_fetched', 'metadata_hash'
+                        ],
+                        batch_size=1000
+                    )
+                    updated_count = len(questions_to_update)
             
             result = {
                 'status': 'SUCCESS',

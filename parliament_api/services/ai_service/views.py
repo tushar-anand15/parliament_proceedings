@@ -5,7 +5,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import extend_schema, extend_schema_view
 from .models import (
     AIAnalysisJob, DocumentSummary, MetadataExtraction, 
     TopicClassification, AIModelUsage, AIPromptTemplate
@@ -14,12 +14,16 @@ from services.questions.models import Question
 from services.files.models import DocumentFile
 
 
+@extend_schema_view(
+    retrieve=extend_schema(operation_id='ai_analysis_jobs_detail')
+)
 class AIAnalysisJobViewSet(viewsets.ModelViewSet):
     """AI analysis job management"""
     queryset = AIAnalysisJob.objects.all()
     permission_classes = []
     
     @extend_schema(
+        operation_id='ai_analysis_jobs_list',
         description="List AI analysis jobs",
         tags=['AI Service']
     )
@@ -72,12 +76,16 @@ class AIAnalysisJobViewSet(viewsets.ModelViewSet):
         }, status=201)
 
 
+@extend_schema_view(
+    retrieve=extend_schema(operation_id='ai_summaries_detail')
+)
 class DocumentSummaryViewSet(viewsets.ModelViewSet):
     """Document summary management"""
     queryset = DocumentSummary.objects.all()
     permission_classes = []
     
     @extend_schema(
+        operation_id='ai_summaries_list',
         description="List document summaries",
         tags=['AI Service']
     )
@@ -100,12 +108,16 @@ class DocumentSummaryViewSet(viewsets.ModelViewSet):
         })
 
 
+@extend_schema_view(
+    retrieve=extend_schema(operation_id='ai_metadata_extractions_detail')
+)
 class MetadataExtractionViewSet(viewsets.ModelViewSet):
     """Metadata extraction management"""
     queryset = MetadataExtraction.objects.all()
     permission_classes = []
     
     @extend_schema(
+        operation_id='ai_metadata_extractions_list',
         description="List metadata extractions",
         tags=['AI Service']
     )
@@ -127,12 +139,16 @@ class MetadataExtractionViewSet(viewsets.ModelViewSet):
         })
 
 
+@extend_schema_view(
+    retrieve=extend_schema(operation_id='ai_topic_classifications_detail')
+)
 class TopicClassificationViewSet(viewsets.ModelViewSet):
     """Topic classification management"""
     queryset = TopicClassification.objects.all()
     permission_classes = []
     
     @extend_schema(
+        operation_id='ai_topic_classifications_list',
         description="List topic classifications",
         tags=['AI Service']
     )
@@ -154,12 +170,16 @@ class TopicClassificationViewSet(viewsets.ModelViewSet):
         })
 
 
+@extend_schema_view(
+    retrieve=extend_schema(operation_id='ai_model_usage_detail')
+)
 class AIModelUsageViewSet(viewsets.ModelViewSet):
     """AI model usage tracking"""
     queryset = AIModelUsage.objects.all()
     permission_classes = []
     
     @extend_schema(
+        operation_id='ai_model_usage_list',
         description="List AI model usage",
         tags=['AI Service']
     )
@@ -184,12 +204,16 @@ class AIModelUsageViewSet(viewsets.ModelViewSet):
         })
 
 
+@extend_schema_view(
+    retrieve=extend_schema(operation_id='ai_prompt_templates_detail')
+)
 class AIPromptTemplateViewSet(viewsets.ModelViewSet):
     """AI prompt template management"""
     queryset = AIPromptTemplate.objects.all()
     permission_classes = []
     
     @extend_schema(
+        operation_id='ai_prompt_templates_list',
         description="List AI prompt templates",
         tags=['AI Service']
     )
