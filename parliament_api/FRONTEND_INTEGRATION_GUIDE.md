@@ -508,11 +508,80 @@ Authorization: Token <your-token>
 
 **Endpoint**: `GET /api/explorer/ls/debates/`
 
-**Important**: Individual debate records must be created first by running:
+**⚠️ IMPORTANT - First Time Setup Required**
+
+Before you can query debate data, you must populate the debate records. This is a **one-time setup** that creates individual debate day records from master data.
+
+#### Step 1: Check Current Status
 ```bash
-python manage.py populate_debates_from_master
+# Activate virtual environment (adjust path as needed)
+source env/bin/activate  # or venv/bin/activate
+
+# Check if debates are already populated
+cd parliament_api
+python manage.py populate_debates_from_master --dry-run
 ```
-This command creates individual debate day records (~1,712 for LS, ~2,429 for RS) from session-level metadata, making them queryable in the explorer. PDF downloads will update these records with file information.
+
+**Expected Output:**
+```
+📊 Current Status:
+  Lok Sabha:
+    • Master Sessions: 45
+    • Available Dates: 1,712
+    • Debate Records: 0    ← If this is 0, you need to populate
+    • Population: 0.0%
+```
+
+#### Step 2: Populate Debate Records
+```bash
+# Populate all debates (LS + RS)
+python manage.py populate_debates_from_master
+
+# Or populate specific institution only
+python manage.py populate_debates_from_master --institution lok_sabha
+python manage.py populate_debates_from_master --institution rajya_sabha
+
+# Or populate specific Lok Sabha/Session
+python manage.py populate_debates_from_master --lok-sabha 18
+python manage.py populate_debates_from_master --lok-sabha 18 --session 5
+```
+
+**This will create:**
+- ~1,712 individual debate day records for Lok Sabha
+- ~2,429 individual debate day records for Rajya Sabha
+- Each record represents one debate day that can be downloaded
+
+**Command Options:**
+- `--force` - Force update existing records
+- `--institution lok_sabha|rajya_sabha` - Process specific institution only
+- `--lok-sabha 18` - Process specific Lok Sabha number
+- `--session 5` - Process specific session (use with --lok-sabha)
+- `--dry-run` - Preview what will be created without making changes
+
+#### Step 3: Verify Population
+```bash
+# Check updated status
+python manage.py populate_debates_from_master --dry-run
+
+# Or query the API directly
+curl 'http://localhost:8000/api/explorer/metadata/debates/?institution=lok_sabha' \
+  -H 'Authorization: Token YOUR_TOKEN'
+```
+
+**Expected Response:**
+```json
+{
+  "statistics": {
+    "total_debates": 1712,
+    "pending": 1712,
+    "completed": 0
+  }
+}
+```
+
+#### What This Does
+
+This command creates individual queryable records for each debate day from session-level master data, making them visible in the Data Explorer **before** PDFs are downloaded. Each record starts with `status: "pending"` and will be updated to `"completed"` once the PDF is downloaded.
 
 #### Query Parameters
 
@@ -665,7 +734,87 @@ Authorization: Token <your-token>
 
 ---
 
-### 5. Get Filter Metadata
+### 5. Troubleshooting Debates Data
+
+#### Problem: "No debate sessions found" or Empty Results
+
+**Check 1: Verify Debates Are Populated**
+```bash
+# Check if debate records exist
+curl 'https://api.opensansad.co.in/api/explorer/metadata/debates/?institution=lok_sabha' \
+  -H 'Authorization: Token YOUR_TOKEN' | python3 -m json.tool
+```
+
+**Expected Response:**
+```json
+{
+  "status": "success",
+  "statistics": {
+    "total_debates": 1712,
+    "pending": 1712
+  }
+}
+```
+
+If `total_debates: 0`, run the population command:
+```bash
+cd parliament_api
+source ../env/bin/activate
+python manage.py populate_debates_from_master
+```
+
+**Check 2: Test the List Endpoint Directly**
+```bash
+# Test without filters
+curl 'https://api.opensansad.co.in/api/explorer/ls/debates/?limit=10' \
+  -H 'Authorization: Token YOUR_TOKEN' | python3 -m json.tool
+```
+
+**Expected Response:**
+```json
+{
+  "status": "success",
+  "data": {
+    "debates": [...],
+    "pagination": {
+      "total": 1712,
+      "returned": 10
+    }
+  }
+}
+```
+
+If this works but your frontend shows "No data":
+- ✅ Backend is working correctly
+- ❌ Issue is in frontend filtering or display logic
+- Check: Frontend filters may be too restrictive
+- Check: Frontend pagination offset may be out of range
+- Check: Frontend response parsing
+
+**Check 3: Verify Master Data Exists**
+
+If metadata shows 0 debates, you may need to initialize master data first:
+
+```bash
+# Initialize Lok Sabha debate master data (corrected debates)
+python manage.py initialize_debates_master_data
+
+# Initialize Rajya Sabha debate master data
+python manage.py initialize_rs_debates_master_data
+
+# Then populate individual records
+python manage.py populate_debates_from_master
+```
+
+**Complete Setup Flow:**
+1. `initialize_debates_master_data` → Creates session-level metadata (LS)
+2. `initialize_rs_debates_master_data` → Creates session-level metadata (RS)
+3. `populate_debates_from_master` → Creates individual debate day records
+4. Data is now queryable via `/api/explorer/ls/debates/` and `/api/explorer/rs/debates/`
+
+---
+
+### 6. Get Filter Metadata
 
 #### Questions Metadata
 
@@ -762,7 +911,7 @@ GET /api/explorer/metadata/debates/?institution=rajya_sabha
 
 ---
 
-### 6. Get Individual Record Details
+### 7. Get Individual Record Details
 
 #### Question Detail
 ```bash

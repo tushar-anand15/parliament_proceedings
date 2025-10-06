@@ -1,0 +1,38 @@
+[Unit]
+Description=Parliament API Daphne (ASGI) Server
+After=network.target postgresql.service redis.service
+Wants=postgresql.service redis.service
+
+[Service]
+Type=simple
+User=tusharanand
+Group=tusharanand
+WorkingDirectory=/home/tusharanand/parliament_proceedings/parliament_api
+
+# Environment
+EnvironmentFile=/home/tusharanand/parliament_proceedings/parliament_api/.env
+Environment="DJANGO_SETTINGS_MODULE=parliament_api.settings"
+
+# Start Daphne ASGI server
+ExecStart=/home/tusharanand/parliament_proceedings/env/bin/daphne \
+    -b 0.0.0.0 \
+    -p 8000 \
+    --access-log /var/log/parliament_api/daphne-access.log \
+    --proxy-headers \
+    parliament_api.asgi:application
+
+# Restart policy
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/parliament_api/daphne.log
+StandardError=append:/var/log/parliament_api/daphne-error.log
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Limits
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

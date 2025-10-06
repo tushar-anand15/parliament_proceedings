@@ -1,0 +1,45 @@
+[Unit]
+Description=Parliament API Gunicorn (WSGI) Server
+After=network.target postgresql.service redis.service
+Wants=postgresql.service redis.service
+
+[Service]
+Type=notify
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/parliament_api
+
+# Environment
+EnvironmentFile=/opt/parliament_api/.env
+Environment="DJANGO_SETTINGS_MODULE=parliament_api.settings"
+
+# Start Gunicorn WSGI server
+ExecStart=/opt/parliament_api/venv/bin/gunicorn \
+    --bind 0.0.0.0:8000 \
+    --workers 4 \
+    --worker-class sync \
+    --threads 2 \
+    --timeout 120 \
+    --max-requests 1000 \
+    --max-requests-jitter 50 \
+    --access-logfile /var/log/parliament_api/gunicorn-access.log \
+    --error-logfile /var/log/parliament_api/gunicorn-error.log \
+    --log-level info \
+    --forwarded-allow-ips='*' \
+    parliament_api.wsgi:application
+
+# Restart policy
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/parliament_api/gunicorn.log
+StandardError=append:/var/log/parliament_api/gunicorn-error.log
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Limits
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

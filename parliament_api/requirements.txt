@@ -32,5 +32,21 @@ python-dateutil==2.9.0.post0
 google-cloud-storage==2.10.0
 google-auth==2.23.4
 
-# Production
-gunicorn==23.0.0 
+# Production Servers
+gunicorn==23.0.0
+daphne==4.1.2
+uvicorn[standard]==0.34.0
+
+# Static Files & Security
+whitenoise==6.8.2
+django-environ==0.11.2
+
+# Rate Limiting & Security
+django-ratelimit==4.1.0
+django-axes==7.0.0
+
+# Health Checks
+django-health-check==3.18.3
+
+# Monitoring
+sentry-sdk==2.20.0 

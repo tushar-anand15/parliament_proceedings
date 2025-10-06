@@ -1,0 +1,36 @@
+[Unit]
+Description=Parliament API Flower (Celery Monitoring)
+After=network.target redis.service
+Wants=redis.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/parliament_api
+
+# Environment
+EnvironmentFile=/opt/parliament_api/.env
+Environment="DJANGO_SETTINGS_MODULE=parliament_api.settings"
+
+# Start Flower
+ExecStart=/opt/parliament_api/venv/bin/celery -A parliament_api flower \
+    --port=5555 \
+    --address=127.0.0.1 \
+    --url_prefix=flower \
+    --persistent=True \
+    --db=/opt/parliament_api/flower.db \
+    --max_tasks=10000
+
+# Restart policy
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/parliament_api/flower.log
+StandardError=append:/var/log/parliament_api/flower-error.log
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

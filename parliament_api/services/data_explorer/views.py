@@ -44,14 +44,22 @@ class BasePaginatedExplorerView(APIView):
         limit = min(int(request.query_params.get('limit', 100)), 500)  # Max 500
         offset = int(request.query_params.get('offset', 0))
         
-        # Try to get total count from cache
+        # Try to get total count from cache (with graceful fallback)
+        total_count = None
         cache_key = f"{cache_key_prefix}_count"
-        total_count = cache.get(cache_key)
+        
+        try:
+            total_count = cache.get(cache_key)
+        except Exception as e:
+            logger.warning(f"Cache get failed: {e}. Continuing without cache.")
         
         if total_count is None:
             total_count = queryset.count()
-            # Cache for 5 minutes
-            cache.set(cache_key, total_count, 300)
+            # Try to cache for 5 minutes (gracefully fail if cache unavailable)
+            try:
+                cache.set(cache_key, total_count, 300)
+            except Exception as e:
+                logger.warning(f"Cache set failed: {e}. Continuing without cache.")
         
         # Get paginated results
         paginated = queryset[offset:offset + limit]
@@ -792,7 +800,13 @@ class QuestionMetadataView(APIView):
             
             # Cache key
             cache_key = f"question_metadata_{institution}"
-            cached_data = cache.get(cache_key)
+            cached_data = None
+            
+            # Try to get from cache (gracefully fail if cache unavailable)
+            try:
+                cached_data = cache.get(cache_key)
+            except Exception as e:
+                logger.warning(f"Cache get failed: {e}. Continuing without cache.")
             
             if cached_data:
                 return Response(cached_data)
@@ -851,8 +865,11 @@ class QuestionMetadataView(APIView):
                 'statistics': stats
             }
             
-            # Cache for 1 hour
-            cache.set(cache_key, response_data, 3600)
+            # Try to cache for 1 hour (gracefully fail if cache unavailable)
+            try:
+                cache.set(cache_key, response_data, 3600)
+            except Exception as e:
+                logger.warning(f"Cache set failed: {e}. Continuing without cache.")
             
             return Response(response_data)
             
@@ -896,7 +913,13 @@ class DebateMetadataView(APIView):
             
             # Cache key
             cache_key = f"debate_metadata_{institution}"
-            cached_data = cache.get(cache_key)
+            cached_data = None
+            
+            # Try to get from cache (gracefully fail if cache unavailable)
+            try:
+                cached_data = cache.get(cache_key)
+            except Exception as e:
+                logger.warning(f"Cache get failed: {e}. Continuing without cache.")
             
             if cached_data:
                 return Response(cached_data)
@@ -949,8 +972,11 @@ class DebateMetadataView(APIView):
                 'statistics': stats
             }
             
-            # Cache for 1 hour
-            cache.set(cache_key, response_data, 3600)
+            # Try to cache for 1 hour (gracefully fail if cache unavailable)
+            try:
+                cache.set(cache_key, response_data, 3600)
+            except Exception as e:
+                logger.warning(f"Cache set failed: {e}. Continuing without cache.")
             
             return Response(response_data)
             

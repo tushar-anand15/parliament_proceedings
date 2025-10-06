@@ -56,9 +56,21 @@ def api_root(request):
     })
 
 
+def health_check(request):
+    """Simple health check endpoint"""
+    return JsonResponse({
+        'status': 'healthy',
+        'service': 'parliament_api',
+    })
+
+
 urlpatterns = [
     # Root redirect
     path('', home_redirect, name='home'),
+    
+    # Health check endpoints
+    path('health/', health_check, name='health-check'),
+    path('ht/', include('health_check.urls')),  # Detailed health checks at /ht/
     
     # Admin interface
     path('admin/', admin.site.urls),
