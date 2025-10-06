@@ -70,7 +70,7 @@ class RegisterView(APIView):
 
 class LogoutView(APIView):
     """User logout endpoint"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Logout user and invalidate token",
@@ -88,7 +88,7 @@ class LogoutView(APIView):
 
 class UserProfileView(APIView):
     """User profile management"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Get current user profile",
@@ -148,7 +148,7 @@ class UserProfileView(APIView):
 
 class ChangePasswordView(APIView):
     """Change user password"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Change user password",
@@ -179,7 +179,7 @@ class ChangePasswordView(APIView):
 class UserViewSet(viewsets.ModelViewSet):
     """User management viewset"""
     queryset = User.objects.all()
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(tags=['Authentication'])
     def list(self, request):
@@ -204,7 +204,7 @@ class UserViewSet(viewsets.ModelViewSet):
 
 class APIKeyViewSet(viewsets.ModelViewSet):
     """API Key management"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(tags=['Authentication'])
     def list(self, request):
@@ -249,7 +249,7 @@ class APIKeyViewSet(viewsets.ModelViewSet):
 
 class UserSessionListView(generics.ListAPIView):
     """List user sessions"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="List user's active sessions",
@@ -275,7 +275,7 @@ class UserSessionListView(generics.ListAPIView):
 
 class UserActivityListView(generics.ListAPIView):
     """List user activities"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="List user's recent activities",
@@ -299,7 +299,7 @@ class UserActivityListView(generics.ListAPIView):
 
 class UserNotificationListView(generics.ListAPIView):
     """List user notifications"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="List user's notifications",

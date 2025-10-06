@@ -41,6 +41,13 @@ def api_root(request):
                 'rajya_sabha': '/api/questions/rs/'
             },
             'debates': '/api/debates/',
+            'data_explorer': {
+                'ls_questions': '/api/explorer/ls/questions/',
+                'rs_questions': '/api/explorer/rs/questions/',
+                'ls_debates': '/api/explorer/ls/debates/',
+                'rs_debates': '/api/explorer/rs/debates/',
+                'metadata': '/api/explorer/metadata/'
+            },
             'scraper': '/api/scraper/',
             'files': '/api/files/',
             'ai_service': '/api/ai/',
@@ -71,4 +78,5 @@ urlpatterns = [
     path('api/files/', include('services.files.urls')),
     path('api/ai/', include('services.ai_service.urls')),
     path('api/debates/', include('services.debates.urls')),
+    path('api/explorer/', include('services.data_explorer.urls')),  # Data Explorer
 ]

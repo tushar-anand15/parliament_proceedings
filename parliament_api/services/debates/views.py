@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 class HealthCheckView(APIView):
     """Health check endpoint for service availability testing"""
-    permission_classes = []
+    permission_classes = [AllowAny]  # Public health check
     
     def get(self, request):
         """Health check endpoint"""
@@ -35,7 +35,7 @@ class HealthCheckView(APIView):
 class DebateViewSet(viewsets.ModelViewSet):
     """Debate management endpoints"""
     queryset = Debate.objects.all()
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="List debates",
@@ -160,7 +160,7 @@ class DebateViewSet(viewsets.ModelViewSet):
 
 class StartDebateScrapingView(APIView):
     """Start debate scraping operation"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication - admin only
     
     @extend_schema(
         description="Start scraping debates for a Lok Sabha session",
@@ -267,7 +267,7 @@ class StartDebateScrapingView(APIView):
 
 class CeleryTaskStatusView(APIView):
     """Get Celery task status"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Get status of a Celery task",
@@ -328,7 +328,7 @@ class CeleryTaskStatusView(APIView):
 
 class DebateScrapingStatusView(APIView):
     """Get debate scraping status"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Get current debate scraping status",
@@ -382,7 +382,7 @@ class DebateScrapingStatusView(APIView):
 
 class SessionDiscoveryView(APIView):
     """Discover all available sessions from both modern and historical APIs"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Discover all available Lok Sabha sessions from both modern and historical APIs",
@@ -414,7 +414,7 @@ class SessionDiscoveryView(APIView):
 
 class DebateStatisticsView(APIView):
     """Get comprehensive debate statistics"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Get detailed statistics about debates in the database",
@@ -510,7 +510,7 @@ class DebateStatisticsView(APIView):
 
 class BulkDownloadDebatesView(APIView):
     """Bulk download debate PDFs"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Queue multiple debates for PDF download",
@@ -569,7 +569,7 @@ class BulkDownloadDebatesView(APIView):
 
 class DebateDownloadQueueView(APIView):
     """View download queue for debates"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Get debate download queue status",
@@ -631,7 +631,7 @@ class DebateDownloadQueueView(APIView):
 
 class DebateSearchView(APIView):
     """Search debates"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Search debates by various criteria",

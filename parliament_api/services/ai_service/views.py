@@ -20,7 +20,7 @@ from services.files.models import DocumentFile
 class AIAnalysisJobViewSet(viewsets.ModelViewSet):
     """AI analysis job management"""
     queryset = AIAnalysisJob.objects.all()
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         operation_id='ai_analysis_jobs_list',
@@ -82,7 +82,7 @@ class AIAnalysisJobViewSet(viewsets.ModelViewSet):
 class DocumentSummaryViewSet(viewsets.ModelViewSet):
     """Document summary management"""
     queryset = DocumentSummary.objects.all()
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         operation_id='ai_summaries_list',
@@ -114,7 +114,7 @@ class DocumentSummaryViewSet(viewsets.ModelViewSet):
 class MetadataExtractionViewSet(viewsets.ModelViewSet):
     """Metadata extraction management"""
     queryset = MetadataExtraction.objects.all()
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         operation_id='ai_metadata_extractions_list',
@@ -145,7 +145,7 @@ class MetadataExtractionViewSet(viewsets.ModelViewSet):
 class TopicClassificationViewSet(viewsets.ModelViewSet):
     """Topic classification management"""
     queryset = TopicClassification.objects.all()
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         operation_id='ai_topic_classifications_list',
@@ -176,7 +176,7 @@ class TopicClassificationViewSet(viewsets.ModelViewSet):
 class AIModelUsageViewSet(viewsets.ModelViewSet):
     """AI model usage tracking"""
     queryset = AIModelUsage.objects.all()
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         operation_id='ai_model_usage_list',
@@ -210,7 +210,7 @@ class AIModelUsageViewSet(viewsets.ModelViewSet):
 class AIPromptTemplateViewSet(viewsets.ModelViewSet):
     """AI prompt template management"""
     queryset = AIPromptTemplate.objects.all()
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         operation_id='ai_prompt_templates_list',
@@ -240,7 +240,7 @@ class AIPromptTemplateViewSet(viewsets.ModelViewSet):
 # Text Analysis Views
 class AnalyzeTextView(APIView):
     """Analyze text content"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Analyze text using AI",
@@ -287,7 +287,7 @@ class AnalyzeTextView(APIView):
 
 class AnalyzeDocumentView(APIView):
     """Analyze document content"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Analyze document content using AI",
@@ -324,7 +324,7 @@ class AnalyzeDocumentView(APIView):
 
 class BatchAnalysisView(APIView):
     """Batch analysis of multiple items"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Perform batch analysis on multiple items",
@@ -358,7 +358,7 @@ class BatchAnalysisView(APIView):
 # Summarization Views
 class SummarizeTextView(APIView):
     """Summarize text content"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Summarize text using AI",
@@ -392,7 +392,7 @@ class SummarizeTextView(APIView):
 
 class SummarizeQuestionView(APIView):
     """Summarize parliamentary question"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Summarize a parliamentary question",
@@ -431,7 +431,7 @@ class SummarizeQuestionView(APIView):
 
 class SummarizeMultipleView(APIView):
     """Summarize multiple documents or questions"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Summarize multiple items",
@@ -469,7 +469,7 @@ class SummarizeMultipleView(APIView):
 # Topic Classification Views
 class ClassifyTopicView(APIView):
     """Classify text topic"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Classify topic of text",
@@ -500,7 +500,7 @@ class ClassifyTopicView(APIView):
 
 class ClassifyQuestionView(APIView):
     """Classify parliamentary question topic"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Classify topic of a parliamentary question",
@@ -536,7 +536,7 @@ class ClassifyQuestionView(APIView):
 
 class BatchClassifyView(APIView):
     """Batch topic classification"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Classify topics for multiple items",
@@ -571,7 +571,7 @@ class BatchClassifyView(APIView):
 # Question Processing Views
 class ProcessQuestionView(APIView):
     """Process parliamentary question with AI"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Process a parliamentary question with AI",
@@ -642,7 +642,7 @@ class ProcessQuestionView(APIView):
 
 class ExtractKeywordsView(APIView):
     """Extract keywords from text"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Extract keywords from text",
@@ -675,7 +675,7 @@ class ExtractKeywordsView(APIView):
 
 class ExtractEntitiesView(APIView):
     """Extract named entities from text"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Extract named entities from text",
@@ -713,7 +713,7 @@ class ExtractEntitiesView(APIView):
 # AI Models and Configuration Views
 class AIModelsView(APIView):
     """List available AI models"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="List available AI models",
@@ -756,7 +756,7 @@ class AIModelsView(APIView):
 
 class TestModelView(APIView):
     """Test AI model functionality"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Test AI model with sample input",
@@ -793,7 +793,7 @@ class TestModelView(APIView):
 
 class ModelStatusView(APIView):
     """Get AI model status"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Get status of AI models",
@@ -814,7 +814,7 @@ class ModelStatusView(APIView):
 # Job Management Views
 class JobStatusView(APIView):
     """Get job status"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Get status of AI jobs",
@@ -842,7 +842,7 @@ class JobStatusView(APIView):
 
 class JobQueueView(APIView):
     """Get job queue"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Get AI job queue",
@@ -868,7 +868,7 @@ class JobQueueView(APIView):
 
 class JobResultView(APIView):
     """Get job result"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Get result of AI job",
@@ -897,7 +897,7 @@ class JobResultView(APIView):
 
 class CancelJobView(APIView):
     """Cancel AI job"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Cancel AI job",
@@ -926,7 +926,7 @@ class CancelJobView(APIView):
 # Statistics and Monitoring Views
 class AIStatsView(APIView):
     """Get AI service statistics"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Get AI service statistics",
@@ -967,7 +967,7 @@ class AIStatsView(APIView):
 
 class UsageStatsView(APIView):
     """Get usage statistics"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Get AI service usage statistics",
@@ -1015,7 +1015,7 @@ class UsageStatsView(APIView):
 
 class CostAnalysisView(APIView):
     """Get cost analysis"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Get AI service cost analysis",

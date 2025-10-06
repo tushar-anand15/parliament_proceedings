@@ -17,7 +17,7 @@ from .models import DocumentFile, DownloadQueue, DownloadBatch, FileAccessLog
 class DocumentFileViewSet(viewsets.ModelViewSet):
     """Document file management"""
     queryset = DocumentFile.objects.all()
-    permission_classes = []
+    permission_classes = [AllowAny]  # Public read access for data explorer
     
     @extend_schema(
         description="List document files",
@@ -73,7 +73,7 @@ class DocumentFileViewSet(viewsets.ModelViewSet):
 class DownloadQueueViewSet(viewsets.ModelViewSet):
     """Download queue management"""
     queryset = DownloadQueue.objects.all()
-    permission_classes = []
+    permission_classes = [AllowAny]  # Public read access for data explorer
     
     @extend_schema(
         description="List download queue items",
@@ -102,7 +102,7 @@ class DownloadQueueViewSet(viewsets.ModelViewSet):
 class DownloadBatchViewSet(viewsets.ModelViewSet):
     """Download batch management"""
     queryset = DownloadBatch.objects.all()
-    permission_classes = []
+    permission_classes = [AllowAny]  # Public read access for data explorer
     
     @extend_schema(
         description="List download batches",
@@ -130,7 +130,7 @@ class DownloadBatchViewSet(viewsets.ModelViewSet):
 
 class FileUploadView(APIView):
     """File upload endpoint"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     parser_classes = [MultiPartParser, FormParser]
     
     @extend_schema(

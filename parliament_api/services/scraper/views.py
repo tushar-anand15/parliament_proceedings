@@ -17,7 +17,7 @@ from .scraper_service import ParliamentQuestionsScraperService
 class ScrapingJobViewSet(viewsets.ModelViewSet):
     """Scraping job management"""
     queryset = ScrapingJob.objects.all()
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="List scraping jobs",
@@ -69,7 +69,7 @@ class ScrapingJobViewSet(viewsets.ModelViewSet):
 class ScrapingSessionViewSet(viewsets.ModelViewSet):
     """Scraping session management"""
     queryset = ScrapingSession.objects.all()
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="List scraping sessions",
@@ -99,7 +99,7 @@ class ScrapingSessionViewSet(viewsets.ModelViewSet):
 class ScrapingErrorViewSet(viewsets.ModelViewSet):
     """Scraping error tracking"""
     queryset = ScrapingError.objects.all()
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="List scraping errors",
@@ -126,7 +126,7 @@ class ScrapingErrorViewSet(viewsets.ModelViewSet):
 class ScrapingConfigViewSet(viewsets.ModelViewSet):
     """Scraping configuration management"""
     queryset = ScrapingConfig.objects.all()
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="List scraping configurations",
@@ -153,7 +153,7 @@ class ScrapingConfigViewSet(viewsets.ModelViewSet):
 class DataSourceViewSet(viewsets.ModelViewSet):
     """Data source management"""
     queryset = DataSource.objects.all()
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="List data sources",
@@ -180,7 +180,7 @@ class DataSourceViewSet(viewsets.ModelViewSet):
 
 class StartScrapingView(APIView):
     """Start scraping operation"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Start a new scraping operation",
@@ -269,7 +269,7 @@ class StartScrapingView(APIView):
 
 class StopScrapingView(APIView):
     """Stop scraping operation"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Stop active scraping operation",
@@ -305,7 +305,7 @@ class StopScrapingView(APIView):
 
 class ScrapingStatusView(APIView):
     """Get scraping status"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Get current scraping status",
@@ -360,7 +360,7 @@ class ScrapingStatusView(APIView):
 
 class LatestJobView(APIView):
     """Get latest job details"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Get details of the latest scraping job",
@@ -396,7 +396,7 @@ class LatestJobView(APIView):
 
 class JobLogsView(APIView):
     """Get job logs"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Get logs for a specific scraping job",
@@ -429,7 +429,7 @@ class JobLogsView(APIView):
 
 class RestartJobView(APIView):
     """Restart a failed job"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Restart a failed scraping job",
@@ -463,7 +463,7 @@ class RestartJobView(APIView):
 
 class DataStatsView(APIView):
     """Get data statistics"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Get statistics about scraped data",
@@ -502,7 +502,7 @@ class DataStatsView(APIView):
 
 class ValidateDataView(APIView):
     """Validate scraped data"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Validate consistency of scraped data",
@@ -530,7 +530,7 @@ class ValidateDataView(APIView):
 
 class CleanupDataView(APIView):
     """Cleanup old data"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Cleanup old scraping data and logs",
@@ -566,7 +566,7 @@ class CleanupDataView(APIView):
 
 class CheckForUpdatesView(APIView):
     """Check for new questions available in API"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Check if there are new questions available on the API compared to database",
@@ -606,7 +606,7 @@ class CheckForUpdatesView(APIView):
 
 class DatabaseStatsView(APIView):
     """Get comprehensive database statistics"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Get detailed statistics about scraped questions in the database",
@@ -738,7 +738,7 @@ class DatabaseStatsView(APIView):
 
 class CleanupStaleJobsView(APIView):
     """Manually cleanup stale jobs"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Manually cleanup jobs that are stuck in running/pending state",
@@ -788,7 +788,7 @@ class CleanupStaleJobsView(APIView):
 
 class JobDetailsView(APIView):
     """Get details of a specific scraping job"""
-    permission_classes = []
+    permission_classes = [IsAuthenticated]  # Requires authentication
     
     @extend_schema(
         description="Get detailed information about a specific scraping job by ID",
