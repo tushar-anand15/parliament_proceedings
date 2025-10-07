@@ -5,21 +5,21 @@ Wants=redis.service
 
 [Service]
 Type=simple
-User=www-data
-Group=www-data
-WorkingDirectory=/opt/parliament_api
+User=tusharanand
+Group=tusharanand
+WorkingDirectory=/home/tusharanand/parliament_proceedings/parliament_api
 
 # Environment
-EnvironmentFile=/opt/parliament_api/.env
+EnvironmentFile=/home/tusharanand/parliament_proceedings/parliament_api/.env
 Environment="DJANGO_SETTINGS_MODULE=parliament_api.settings"
 
 # Start Flower
-ExecStart=/opt/parliament_api/venv/bin/celery -A parliament_api flower \
+ExecStart=/home/tusharanand/parliament_proceedings/env/bin/celery -A parliament_api flower \
     --port=5555 \
     --address=127.0.0.1 \
     --url_prefix=flower \
     --persistent=True \
-    --db=/opt/parliament_api/flower.db \
+    --db=/home/tusharanand/parliament_proceedings/parliament_api/flower.db \
     --max_tasks=10000
 
 # Restart policy
@@ -34,3 +34,5 @@ PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
+
+

@@ -11,6 +11,7 @@ from .models import Question, QuestionMasterData, LokSabha, Session, Member, Min
 from .question_download_service import QuestionDownloadService
 from .master_data_service import QuestionMasterDataService
 from .rs_master_data_service import RajyaSabhaMasterDataService
+from .fast_stats_view import FastDownloadStatsView
 import logging
 
 logger = logging.getLogger(__name__)
@@ -613,6 +614,7 @@ class QuestionMasterDataBulkDownloadView(APIView):
             question_type = request.data.get('question_type')
             limit = request.data.get('limit')
             use_celery = request.data.get('use_celery', True)
+            pending_only = request.data.get('pending_only', True)  # Default to pending only
             
             # Get master data service
             master_service = QuestionMasterDataService()
@@ -622,7 +624,8 @@ class QuestionMasterDataBulkDownloadView(APIView):
                 lok_sabha_number=lok_sabha_number,
                 session_number=session_number,
                 question_type=question_type,
-                limit=limit
+                limit=limit,
+                pending_only=pending_only
             )
             
             if not master_data_list:
@@ -1154,8 +1157,31 @@ class RSQuestionBulkDownloadView(APIView):
             master_data_ids = request.data.get('master_data_ids', [])
             session_number = request.data.get('session_number')
             download_all_session = request.data.get('download_all_session', False)
+            limit = request.data.get('limit')  # NEW: Support limit parameter
+            pending_only = request.data.get('pending_only', True)  # NEW: Support pending_only parameter
             
-            if download_all_session and session_number:
+            # NEW: Support limit and pending_only parameters (for batch download script)
+            if limit is not None and not master_data_ids and not download_all_session:
+                # Query RS questions with limit and pending_only
+                rs_institution = ParliamentInstitution.objects.get(name='rajya_sabha')
+                queryset = QuestionMasterData.objects.filter(
+                    parent_institution=rs_institution
+                ).exclude(questions_file_path='')
+                
+                if pending_only:
+                    queryset = queryset.filter(pdf_downloaded=False)
+                
+                if session_number:
+                    queryset = queryset.filter(session_number=session_number)
+                
+                # Use random ordering to avoid duplicate scheduling
+                queryset = queryset.order_by('?')[:limit]
+                
+                master_data_ids = list(queryset.values_list('id', flat=True))
+                
+                logger.info(f"RS bulk download with limit={limit}, pending_only={pending_only}: found {len(master_data_ids)} questions")
+            
+            elif download_all_session and session_number:
                 # Download all questions for a specific session that haven't been downloaded yet
                 rs_institution = ParliamentInstitution.objects.get(name='rajya_sabha')
                 session_questions = QuestionMasterData.objects.filter(
@@ -1169,7 +1195,7 @@ class RSQuestionBulkDownloadView(APIView):
             elif not master_data_ids:
                 return Response({
                     'status': 'error',
-                    'message': 'No master_data_ids provided and download_all_session is false'
+                    'message': 'No master_data_ids provided and no query parameters specified'
                 }, status=400)
             
             if not master_data_ids:
@@ -1186,7 +1212,7 @@ class RSQuestionBulkDownloadView(APIView):
                 'data': {
                     'task_id': task.id,
                     'questions_queued': len(master_data_ids),
-                    'session_number': session_number if download_all_session else None
+                    'session_number': session_number if session_number else None
                 },
                 'message': f'Queued {len(master_data_ids)} RS questions for bulk download'
             })

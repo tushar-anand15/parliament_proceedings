@@ -5,16 +5,16 @@ Wants=postgresql.service redis.service
 
 [Service]
 Type=notify
-User=www-data
-Group=www-data
-WorkingDirectory=/opt/parliament_api
+User=tusharanand
+Group=tusharanand
+WorkingDirectory=/home/tusharanand/parliament_proceedings/parliament_api
 
 # Environment
-EnvironmentFile=/opt/parliament_api/.env
+EnvironmentFile=/home/tusharanand/parliament_proceedings/parliament_api/.env
 Environment="DJANGO_SETTINGS_MODULE=parliament_api.settings"
 
 # Start Gunicorn WSGI server
-ExecStart=/opt/parliament_api/venv/bin/gunicorn \
+ExecStart=/home/tusharanand/parliament_proceedings/env/bin/gunicorn \
     --bind 0.0.0.0:8000 \
     --workers 4 \
     --worker-class sync \
@@ -43,3 +43,5 @@ LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target
+
+

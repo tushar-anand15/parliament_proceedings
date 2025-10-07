@@ -41,4 +41,7 @@ urlpatterns = [
     path('rs/bulk-download/', views.RSQuestionBulkDownloadView.as_view(), name='rs-question-bulk-download'),
     path('rs/initialize/', views.RSQuestionInitializeView.as_view(), name='rs-question-initialize'),
     path('rs/task-status/<str:task_id>/', views.RSQuestionTaskStatusView.as_view(), name='rs-question-task-status'),
+    
+    # Fast statistics endpoint (optimized for monitoring)
+    path('fast-stats/', views.FastDownloadStatsView.as_view(), name='fast-download-stats'),
 ] 

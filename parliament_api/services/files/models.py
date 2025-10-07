@@ -49,7 +49,7 @@ class DocumentFile(models.Model):
     file_type = models.CharField(max_length=20, choices=FILE_TYPES, default='question')
     original_url = models.URLField(max_length=500)
     file_name = models.CharField(max_length=255)
-    file_path = models.FileField(upload_to='pdfs/', null=True, blank=True)
+    file_path = models.FileField(upload_to='pdfs/', max_length=500, null=True, blank=True)
     file_size = models.BigIntegerField(null=True, blank=True)  # Size in bytes
     content_type = models.CharField(max_length=100, default='application/pdf')
     
@@ -98,7 +98,8 @@ class DocumentFile(models.Model):
 
     @property
     def is_downloaded(self):
-        return self.status == 'completed' and (self.file_path or self.gcs_object_key)
+        # We use GCS storage only, so check gcs_object_key
+        return self.status == 'completed' and self.gcs_object_key
     
     @property
     def is_in_gcs(self):

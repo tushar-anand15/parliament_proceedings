@@ -635,6 +635,9 @@ class QuestionDownloadService:
                 'last_scraped': master_data.last_fetched
             }
             
+            # Add master_data_id to question_data defaults
+            question_data['master_data_id'] = master_data.id
+            
             question, created = Question.objects.get_or_create(
                 question_number=master_data.question_number,
                 lok_sabha=master_data.lok_sabha,
@@ -642,7 +645,11 @@ class QuestionDownloadService:
                 defaults=question_data
             )
             
-            # Link master data to question
+            # Link master data to question (both directions)
+            if not question.master_data_id:
+                question.master_data_id = master_data.id
+                question.save(update_fields=['master_data_id'])
+            
             master_data.question = question
             master_data.is_processed = True
             master_data.processed_at = timezone.now()

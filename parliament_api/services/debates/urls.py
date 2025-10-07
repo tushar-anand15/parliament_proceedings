@@ -19,6 +19,7 @@ urlpatterns = [
     
     # Statistics and search
     path('statistics/', views.DebateStatisticsView.as_view(), name='debate-statistics'),
+    path('download-stats/', views.DebateDownloadStatsView.as_view(), name='debate-download-stats'),  # FAST version
     path('discover-sessions/', views.SessionDiscoveryView.as_view(), name='session-discovery'),
     path('search/', views.DebateSearchView.as_view(), name='debate-search'),
     

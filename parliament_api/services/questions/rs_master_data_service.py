@@ -531,6 +531,13 @@ class RajyaSabhaMasterDataService:
             ).exclude(questions_file_path='').count()
             without_pdf_count = total_questions - with_pdf_count
             
+            # Questions with downloaded PDFs (in GCS)
+            pdfs_downloaded = QuestionMasterData.objects.filter(
+                parent_institution=rs_institution,
+                pdf_downloaded=True
+            ).count()
+            pdfs_pending = with_pdf_count - pdfs_downloaded
+            
             return {
                 'institution': 'rajya_sabha',
                 'total_questions': total_questions,
@@ -542,6 +549,11 @@ class RajyaSabhaMasterDataService:
                 'pdf_availability': {
                     'with_pdf': with_pdf_count,
                     'without_pdf': without_pdf_count
+                },
+                'pdf_download_status': {
+                    'pdfs_downloaded': pdfs_downloaded,
+                    'pdfs_pending': pdfs_pending,
+                    'questions_with_pdf_url': with_pdf_count
                 },
                 'last_updated': timezone.now().isoformat()
             }

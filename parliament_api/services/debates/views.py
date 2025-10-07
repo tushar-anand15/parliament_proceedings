@@ -412,6 +412,33 @@ class SessionDiscoveryView(APIView):
             }, status=500)
 
 
+class DebateDownloadStatsView(APIView):
+    """Fast lightweight statistics for download monitoring (optimized for speed)"""
+    permission_classes = [IsAuthenticated]
+    
+    @extend_schema(
+        description="Get fast download statistics (optimized - only status counts)",
+        tags=['Debates']
+    )
+    def get(self, request):
+        """Get fast debate download statistics - OPTIMIZED for continuous monitoring"""
+        from django.db.models import Count
+        
+        # FAST query: Only get status counts using a single aggregate query
+        status_counts = Debate.objects.values('status').annotate(
+            count=Count('id')
+        )
+        
+        # Convert to dict
+        status_dict = {item['status']: item['count'] for item in status_counts}
+        
+        return Response({
+            'total_debates': sum(status_dict.values()),
+            'status_breakdown': status_dict,
+            'generated_at': timezone.now().isoformat()
+        })
+
+
 class DebateStatisticsView(APIView):
     """Get comprehensive debate statistics"""
     permission_classes = [IsAuthenticated]  # Requires authentication
@@ -661,9 +688,27 @@ class DebateSearchView(APIView):
             queryset = queryset.filter(debate_date__month=month)
         if status:
             queryset = queryset.filter(status=status)
+            # If searching for pending, also filter out debates without PDF URLs
+            # (they can't be downloaded yet)
+            if status == 'pending':
+                queryset = queryset.filter(pdf_url__isnull=False).exclude(pdf_url='')
+                logger.info(f"Debate search: Filtering pending debates with PDF URLs")
         
-        # Order by date
-        debates = queryset.order_by('-debate_date')[:100]
+        # Get limit from query params, default to 100
+        limit = request.query_params.get('limit')
+        if limit:
+            try:
+                limit = int(limit)
+            except ValueError:
+                limit = 100
+        else:
+            limit = 100
+        
+        # IMPORTANT: Use random ordering for pending debates to avoid duplicate scheduling
+        if status == 'pending':
+            debates = queryset.order_by('?')[:limit]  # Random order for pending
+        else:
+            debates = queryset.order_by('-debate_date')[:limit]  # Date order for others
         
         return Response({
             'query': q,

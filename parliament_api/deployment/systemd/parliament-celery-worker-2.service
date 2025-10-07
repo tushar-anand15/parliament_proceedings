@@ -1,5 +1,5 @@
 [Unit]
-Description=Parliament API Celery Worker (Legacy - use worker-1 and worker-2 instead)
+Description=Parliament API Celery Worker 2 (8 concurrent workers)
 After=network.target redis.service postgresql.service
 Wants=redis.service postgresql.service
 
@@ -14,13 +14,12 @@ EnvironmentFile=/home/tusharanand/parliament_proceedings/parliament_api/.env
 Environment="DJANGO_SETTINGS_MODULE=parliament_api.settings"
 Environment="C_FORCE_ROOT=true"
 
-# NOTE: This is the legacy single worker service
-# For better performance, use parliament-celery-worker-1 and parliament-celery-worker-2
+# Start Celery Worker 2 with hostname worker2
 ExecStart=/home/tusharanand/parliament_proceedings/env/bin/celery -A parliament_api worker \
     --loglevel=info \
-    --concurrency=16 \
+    --concurrency=8 \
     --max-tasks-per-child=1000 \
-    --hostname=worker-legacy@%%h
+    --hostname=worker2@%%h
 
 # Stop Celery Worker
 ExecStop=/bin/kill -s TERM $MAINPID
@@ -28,8 +27,8 @@ ExecStop=/bin/kill -s TERM $MAINPID
 # Restart policy
 Restart=always
 RestartSec=10
-StandardOutput=append:/var/log/parliament_api/celery-worker.log
-StandardError=append:/var/log/parliament_api/celery-worker-error.log
+StandardOutput=append:/var/log/parliament_api/celery-worker-2.log
+StandardError=append:/var/log/parliament_api/celery-worker-2-error.log
 
 # Create PID directory
 RuntimeDirectory=parliament_api
@@ -41,5 +40,3 @@ PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
-
-

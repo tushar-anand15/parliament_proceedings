@@ -127,14 +127,31 @@ install_systemd_services() {
         log_info "Enabled parliament-api-daphne"
     fi
     
-    if ! systemctl is-enabled parliament-celery-worker >/dev/null 2>&1; then
-        systemctl enable parliament-celery-worker
-        log_info "Enabled parliament-celery-worker"
+    # Enable dual Celery workers for 2x performance
+    if ! systemctl is-enabled parliament-celery-worker-1 >/dev/null 2>&1; then
+        systemctl enable parliament-celery-worker-1
+        log_info "Enabled parliament-celery-worker-1 (8 concurrent workers)"
+    fi
+    
+    if ! systemctl is-enabled parliament-celery-worker-2 >/dev/null 2>&1; then
+        systemctl enable parliament-celery-worker-2
+        log_info "Enabled parliament-celery-worker-2 (8 concurrent workers)"
+    fi
+    
+    # Keep legacy worker disabled (use worker-1 and worker-2 instead)
+    if systemctl is-enabled parliament-celery-worker >/dev/null 2>&1; then
+        systemctl disable parliament-celery-worker
+        log_info "Disabled legacy parliament-celery-worker (using dual workers instead)"
     fi
     
     if ! systemctl is-enabled parliament-celery-beat >/dev/null 2>&1; then
         systemctl enable parliament-celery-beat
         log_info "Enabled parliament-celery-beat"
+    fi
+    
+    if ! systemctl is-enabled parliament-flower >/dev/null 2>&1; then
+        systemctl enable parliament-flower
+        log_info "Enabled parliament-flower"
     fi
 }
 
@@ -249,17 +266,30 @@ stop_tmux_services() {
 restart_services() {
     log_step "Starting systemd services..."
     
+    # Stop legacy worker if running
+    if systemctl is-active parliament-celery-worker >/dev/null 2>&1; then
+        systemctl stop parliament-celery-worker
+        log_info "Stopped legacy Celery worker"
+    fi
+    
     # Start main application
     systemctl restart parliament-api-daphne
     log_info "Started Daphne service"
     
-    # Start Celery worker
-    systemctl restart parliament-celery-worker
-    log_info "Started Celery worker"
+    # Start dual Celery workers (16 total concurrent workers)
+    systemctl restart parliament-celery-worker-1
+    log_info "Started Celery worker 1 (8 concurrent workers)"
+    
+    systemctl restart parliament-celery-worker-2
+    log_info "Started Celery worker 2 (8 concurrent workers)"
     
     # Start Celery beat
     systemctl restart parliament-celery-beat
     log_info "Started Celery beat"
+    
+    # Start Flower monitoring
+    systemctl restart parliament-flower
+    log_info "Started Flower monitoring"
     
     # Reload Nginx
     systemctl reload nginx
@@ -348,8 +378,10 @@ print_summary() {
     echo -e "${GREEN}════════════════════════════════════════════════════════${NC}"
     echo -e "${GREEN}Services Status:${NC}"
     echo -e "  ✓ Django API (Daphne) - Running on port 8000"
-    echo -e "  ✓ Celery Worker       - Processing tasks"
+    echo -e "  ✓ Celery Worker 1     - 8 concurrent workers"
+    echo -e "  ✓ Celery Worker 2     - 8 concurrent workers (16 total)"
     echo -e "  ✓ Celery Beat         - Scheduling tasks"
+    echo -e "  ✓ Flower              - Monitoring on port 5555"
     echo -e "  ✓ Nginx               - Reverse proxy"
     echo ""
     echo -e "${GREEN}Access Points:${NC}"
@@ -364,10 +396,13 @@ print_summary() {
     fi
     echo ""
     echo -e "${GREEN}Useful Commands:${NC}"
-    echo -e "  Check status:    ${YELLOW}sudo systemctl status parliament-api-daphne${NC}"
-    echo -e "  View logs:       ${YELLOW}sudo journalctl -u parliament-api-daphne -f${NC}"
-    echo -e "  Restart API:     ${YELLOW}sudo systemctl restart parliament-api-daphne${NC}"
-    echo -e "  Restart Celery:  ${YELLOW}sudo systemctl restart parliament-celery-worker${NC}"
+    echo -e "  Check status:        ${YELLOW}sudo systemctl status parliament-api-daphne${NC}"
+    echo -e "  View logs:           ${YELLOW}sudo journalctl -u parliament-api-daphne -f${NC}"
+    echo -e "  Restart API:         ${YELLOW}sudo systemctl restart parliament-api-daphne${NC}"
+    echo -e "  Restart Workers:     ${YELLOW}sudo systemctl restart parliament-celery-worker-{1,2}${NC}"
+    echo -e "  Worker 1 logs:       ${YELLOW}tail -f /var/log/parliament_api/celery-worker-1.log${NC}"
+    echo -e "  Worker 2 logs:       ${YELLOW}tail -f /var/log/parliament_api/celery-worker-2.log${NC}"
+    echo -e "  Flower dashboard:    ${YELLOW}http://localhost:5555/flower/${NC}"
     echo ""
     echo -e "${GREEN}════════════════════════════════════════════════════════${NC}"
 }
@@ -398,3 +433,5 @@ main() {
 
 # Run main function
 main "$@"
+
+

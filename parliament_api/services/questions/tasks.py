@@ -1,4 +1,4 @@
-from celery import shared_task
+from celery import shared_task, group
 from django.utils import timezone
 from django.db import transaction
 from django.conf import settings
@@ -11,6 +11,8 @@ from services.files.models import DocumentFile, DownloadQueue
 from .question_download_service import QuestionDownloadService
 from .rs_master_data_service import RajyaSabhaMasterDataService
 from services.files.pdf_download_service import UnifiedPDFDownloadService
+# Import at module level to avoid circular imports
+from services.files.tasks import download_pdf_unified_task, bulk_download_pdfs_unified_task
 
 logger = logging.getLogger(__name__)
 
@@ -112,8 +114,6 @@ def bulk_download_question_pdfs_task(self, question_ids: list, max_concurrent: i
         max_concurrent: Maximum number of concurrent downloads (note: actual concurrency controlled by worker pool)
     """
     try:
-        from celery import group
-        
         total_questions = len(question_ids)
         skipped = 0
         download_tasks = []
@@ -380,7 +380,12 @@ def get_download_statistics_task(self):
               retry_jitter=True)
 def bulk_download_question_pdfs_from_master_data_task(self, master_data_ids: list):
     """
-    Celery task for bulk downloading question PDFs from master data
+    Celery task for bulk downloading question PDFs from master data WITH TRUE PARALLELISM
+    
+    This task now:
+    1. Collects all master data that needs downloading (metadata phase)
+    2. Dispatches ALL downloads in parallel using celery.group()
+    3. Returns immediately without waiting for downloads to complete
     
     Args:
         master_data_ids: List of QuestionMasterData IDs to process
@@ -405,16 +410,17 @@ def bulk_download_question_pdfs_from_master_data_task(self, master_data_ids: lis
         # Update progress
         self.update_state(
             state='PROGRESS',
-            meta={'status': f'Processing {total_count} questions from master data', 'progress': 10}
+            meta={'status': f'Preparing {total_count} questions for parallel download', 'progress': 10}
         )
+        
+        logger.info(f"Starting parallel bulk download from master data for {total_count} questions")
         
         # Initialize download service
         service = QuestionDownloadService()
         
-        # Process downloads
-        results = {
-            'total': total_count,
-            'queued': 0,
+        # Collect tasks to dispatch
+        download_tasks = []
+        skipped = {
             'already_downloaded': 0,
             'no_pdf': 0,
             'errors': []
@@ -422,63 +428,88 @@ def bulk_download_question_pdfs_from_master_data_task(self, master_data_ids: lis
         
         for i, master_data in enumerate(master_data_list, 1):
             try:
-                # Update progress
-                progress = 10 + (i / total_count) * 80
-                self.update_state(
-                    state='PROGRESS',
-                    meta={
-                        'status': f'Processing question {i}/{total_count}: Q.{master_data.question_number}',
-                        'progress': progress
-                    }
-                )
+                # Update progress periodically
+                if i % 10 == 0:
+                    progress = 10 + int((i / total_count) * 40)  # 10-50%
+                    self.update_state(
+                        state='PROGRESS',
+                        meta={
+                            'status': f'Checking question {i}/{total_count}',
+                            'progress': progress
+                        }
+                    )
                 
                 # Get PDF URL from master data
                 pdf_url = master_data.get_pdf_url()
                 
                 if not pdf_url:
-                    results['no_pdf'] += 1
+                    skipped['no_pdf'] += 1
                     continue
                 
                 # Create or get corresponding Question object
                 question = service._create_question_from_master_data(master_data)
                 
-                # Check if already downloaded
-                existing_doc = DocumentFile.objects.filter(
-                    question=question,
-                    original_url=pdf_url,
-                    status='completed'
-                ).first()
+                # No need to check DocumentFile - the API already filtered for pdf_downloaded=False
+                # This ensures we don't skip items that genuinely need downloading
                 
-                if existing_doc:
-                    results['already_downloaded'] += 1
-                    continue
-                
-                # Download immediately to GCS
-                success = service.download_question_pdf(question, pdf_url)
-                if success:
-                    results['queued'] += 1
-                else:
-                    results['errors'].append(f"Q.{master_data.question_number}: Download failed")
+                # Add to parallel download queue using unified task
+                download_tasks.append(
+                    download_pdf_unified_task.si('question', question.id, pdf_url)
+                )
                 
             except Exception as e:
                 error_msg = f"Q.{master_data.question_number}: {str(e)}"
-                results['errors'].append(error_msg)
+                skipped['errors'].append(error_msg)
                 logger.error(error_msg)
         
-        # Final status update
+        # Dispatch all downloads in parallel
+        tasks_to_dispatch = len(download_tasks)
+        
+        if tasks_to_dispatch == 0:
+            return {
+                'status': 'SUCCESS',
+                'message': f'No new downloads needed: {skipped["already_downloaded"]} already downloaded, {skipped["no_pdf"]} without PDF',
+                'results': {
+                    'total': total_count,
+                    'dispatched': 0,
+                    'already_downloaded': skipped['already_downloaded'],
+                    'no_pdf': skipped['no_pdf'],
+                    'errors': skipped['errors']
+                }
+            }
+        
         self.update_state(
             state='PROGRESS',
             meta={
-                'status': 'Bulk download from master data completed',
-                'progress': 100,
-                'results': results
+                'status': f'Dispatching {tasks_to_dispatch} downloads in parallel',
+                'progress': 60,
+                'total': total_count,
+                'tasks_to_dispatch': tasks_to_dispatch,
+                'skipped': sum([skipped['already_downloaded'], skipped['no_pdf']])
             }
         )
         
+        # Dispatch ALL downloads in parallel using group()
+        job = group(download_tasks)
+        group_result = job.apply_async()
+        
+        logger.info(f"✅ PARALLEL DISPATCH: {tasks_to_dispatch} PDF downloads dispatched simultaneously!")
+        logger.info(f"   Group ID: {group_result.id}")
+        logger.info(f"   Worker pool will process these {tasks_to_dispatch} tasks in parallel")
+        
+        # Return immediately - don't wait!
         return {
-            'status': 'SUCCESS',
-            'message': f'Bulk download from master data completed: {results["queued"]} queued, {results["already_downloaded"]} already downloaded',
-            'results': results
+            'status': 'DISPATCHED',
+            'message': f'All downloads dispatched in parallel - {tasks_to_dispatch} tasks queued',
+            'results': {
+                'total': total_count,
+                'dispatched': tasks_to_dispatch,
+                'already_downloaded': skipped['already_downloaded'],
+                'no_pdf': skipped['no_pdf'],
+                'errors': skipped['errors']
+            },
+            'group_id': group_result.id,
+            'note': 'Downloads are running in parallel. Check Celery Flower for progress.'
         }
         
     except Exception as e:
@@ -587,8 +618,7 @@ def scrape_rs_questions_task(self,
                     }
                 )
                 
-                # Queue bulk download task
-                from services.files.tasks import bulk_download_pdfs_unified_task
+                # Queue bulk download task (imported at module level)
                 bulk_task = bulk_download_pdfs_unified_task.delay(download_specs)
                 pdfs_queued = len(download_specs)
                 
@@ -647,8 +677,7 @@ def download_rs_question_pdf_task(self, master_data_id: int, pdf_url: str = None
         # Get the master data
         master_data = QuestionMasterData.objects.get(id=master_data_id)
         
-        # Use unified download task
-        from services.files.tasks import download_pdf_unified_task
+        # Use unified download task (imported at module level)
         result = download_pdf_unified_task.delay('rs_question', master_data_id, pdf_url).get()
         
         if result['status'] == 'SUCCESS':
@@ -703,9 +732,6 @@ def bulk_download_rs_question_pdfs_task(self, master_data_ids: list):
         master_data_ids: List of QuestionMasterData IDs to download PDFs for
     """
     try:
-        from celery import group
-        from services.files.tasks import download_pdf_unified_task
-        
         total_questions = len(master_data_ids)
         
         # Update initial progress

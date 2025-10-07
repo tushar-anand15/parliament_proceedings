@@ -70,6 +70,33 @@ def download_pdf_unified_task(self, document_type: str, document_id: int, pdf_ur
                 meta={'status': f'{document_type} PDF downloaded successfully', 'progress': 100}
             )
             
+            # Update QuestionMasterData.pdf_downloaded after successful GCS upload
+            if result.get('gcs_result', {}).get('success'):
+                try:
+                    if document_type == 'question':
+                        # LS Question - find master_data via reverse relationship
+                        question = Question.objects.get(id=document_id)
+                        # Use reverse lookup: master_data.question -> QuestionMasterData
+                        master_data = QuestionMasterData.objects.filter(question=question).first()
+                        if master_data:
+                            master_data.pdf_downloaded = True
+                            master_data.pdf_gcs_path = result.get('gcs_result', {}).get('object_key', '')
+                            master_data.save(update_fields=['pdf_downloaded', 'pdf_gcs_path'])
+                            logger.info(f"✅ Updated LS master_data {master_data.id} pdf_downloaded=True")
+                        else:
+                            logger.warning(f"No master_data found for question {document_id}")
+                    
+                    elif document_type == 'rs_question':
+                        # RS Question - update the master_data directly (document_id IS the master_data_id)
+                        master_data = QuestionMasterData.objects.get(id=document_id)
+                        master_data.pdf_downloaded = True
+                        master_data.pdf_gcs_path = result.get('gcs_result', {}).get('object_key', '')
+                        master_data.save(update_fields=['pdf_downloaded', 'pdf_gcs_path'])
+                        logger.info(f"✅ Updated RS master_data {master_data.id} pdf_downloaded=True")
+                        
+                except Exception as e:
+                    logger.warning(f"❌ Failed to update master_data pdf_downloaded for {document_type}: {e}")
+            
             return {
                 'status': 'SUCCESS',
                 'document_type': document_type,

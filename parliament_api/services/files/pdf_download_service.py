@@ -504,7 +504,7 @@ class UnifiedPDFDownloadService:
                         'document_category': 'parl_question',
                         'file_type': 'question',
                         'file_name': result['filename'],
-                        'file_path': result.get('local_path', ''),
+                        # file_path intentionally NOT set - we use GCS storage only
                         'file_size': result['file_size'],
                         'status': 'completed',
                         'downloaded_at': timezone.now(),
@@ -515,7 +515,7 @@ class UnifiedPDFDownloadService:
                 if not created:
                     # Update existing record
                     doc_file.file_name = result['filename']
-                    doc_file.file_path = result.get('local_path', '')
+                    # file_path intentionally NOT set - we use GCS storage only
                     doc_file.file_size = result['file_size']
                     doc_file.status = 'completed'
                     doc_file.downloaded_at = timezone.now()
@@ -596,7 +596,7 @@ class UnifiedPDFDownloadService:
                 
                 # Update document file
                 doc_file.file_name = result['filename']
-                doc_file.file_path = result.get('local_path', '')
+                # file_path intentionally NOT set - we use GCS storage only
                 doc_file.file_size = result['file_size']
                 doc_file.status = 'completed'
                 doc_file.downloaded_at = timezone.now()
@@ -669,7 +669,7 @@ class UnifiedPDFDownloadService:
                         'document_category': 'parl_rs_question',
                         'file_type': 'rs_question',
                         'file_name': result['filename'],
-                        'file_path': result.get('local_path', ''),
+                        # file_path intentionally NOT set - we use GCS storage only
                         'file_size': result['file_size'],
                         'status': 'completed',
                         'downloaded_at': timezone.now(),
@@ -680,7 +680,7 @@ class UnifiedPDFDownloadService:
                 if not created:
                     # Update existing record
                     doc_file.file_name = result['filename']
-                    doc_file.file_path = result.get('local_path', '')
+                    # file_path intentionally NOT set - we use GCS storage only
                     doc_file.file_size = result['file_size']
                     doc_file.status = 'completed'
                     doc_file.downloaded_at = timezone.now()

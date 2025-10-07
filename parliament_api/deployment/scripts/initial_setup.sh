@@ -13,9 +13,9 @@ NC='\033[0m' # No Color
 
 # Configuration
 APP_NAME="parliament_api"
-APP_USER="www-data"
-APP_DIR="/opt/parliament_api"
-VENV_DIR="$APP_DIR/venv"
+APP_USER="tusharanand"
+APP_DIR="/home/tusharanand/parliament_proceedings/parliament_api"
+VENV_DIR="/home/tusharanand/parliament_proceedings/env"
 LOG_DIR="/var/log/parliament_api"
 PYTHON_VERSION="python3.11"  # Adjust as needed
 
@@ -206,11 +206,11 @@ print_next_steps() {
     echo ""
     echo -e "${YELLOW}2. Run Migrations:${NC}"
     echo "   cd $APP_DIR"
-    echo "   sudo -u $APP_USER $VENV_DIR/bin/python manage.py migrate"
-    echo "   sudo -u $APP_USER $VENV_DIR/bin/python manage.py collectstatic"
+    echo "   $VENV_DIR/bin/python manage.py migrate"
+    echo "   $VENV_DIR/bin/python manage.py collectstatic"
     echo ""
     echo -e "${YELLOW}3. Create Superuser:${NC}"
-    echo "   sudo -u $APP_USER $VENV_DIR/bin/python manage.py createsuperuser"
+    echo "   $VENV_DIR/bin/python manage.py createsuperuser"
     echo ""
     echo -e "${YELLOW}4. Configure Nginx:${NC}"
     echo "   - Edit /etc/nginx/sites-available/parliament-api"
@@ -253,3 +253,5 @@ main() {
 
 # Run main function
 main "$@"
+
+

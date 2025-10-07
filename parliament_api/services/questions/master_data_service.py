@@ -990,21 +990,29 @@ class QuestionMasterDataService:
     def get_questions_for_download(self, lok_sabha_number: Optional[str] = None,
                                  session_number: Optional[str] = None,
                                  question_type: Optional[str] = None,
-                                 limit: Optional[int] = None) -> List[QuestionMasterData]:
+                                 limit: Optional[int] = None,
+                                 pending_only: bool = True) -> List[QuestionMasterData]:
         """
-        Get questions ready for PDF download
+        Get questions ready for PDF download (ONLY pending downloads by default)
         
         Args:
             lok_sabha_number: Filter by Lok Sabha
             session_number: Filter by session
             question_type: Filter by question type
             limit: Limit number of results
+            pending_only: If True, only return questions without downloaded PDFs (default: True)
             
         Returns:
-            List of QuestionMasterData objects with PDF URLs
+            List of QuestionMasterData objects with PDF URLs that need downloading
         """
         try:
+            # Start with questions that have PDF URLs
             queryset = QuestionMasterData.objects.exclude(questions_file_path='')
+            
+            if pending_only:
+                # Use the pdf_downloaded field to filter out already downloaded items
+                queryset = queryset.filter(pdf_downloaded=False)
+                logger.info(f"Filtering for pending downloads (pdf_downloaded=False)")
             
             if lok_sabha_number:
                 queryset = queryset.filter(lok_sabha_number=lok_sabha_number)
@@ -1015,10 +1023,15 @@ class QuestionMasterDataService:
             if question_type:
                 queryset = queryset.filter(question_type=question_type)
             
-            queryset = queryset.order_by('-date', '-question_number')
+            # IMPORTANT: Use random ordering to avoid duplicate scheduling
+            # When there are many pending items, always taking the first N
+            # results in the same items being scheduled repeatedly
+            queryset = queryset.order_by('?')  # Random order
             
             if limit:
                 queryset = queryset[:limit]
+            
+            logger.info(f"get_questions_for_download: Found {queryset.count()} pending questions (pending_only={pending_only})")
             
             return list(queryset)
             
