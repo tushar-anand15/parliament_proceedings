@@ -805,7 +805,7 @@ class QuestionSessionTestView(APIView):
             random_questions = QuestionMasterData.objects.filter(
                 lok_sabha_number=lok_sabha_number,
                 session_number=session_number
-            ).exclude(questions_file_path='').order_by('?')[:question_count]
+            ).exclude(questions_file_path='').order_by('date', 'question_number')[:question_count]
             
             if not random_questions:
                 return Response({
@@ -1174,8 +1174,8 @@ class RSQuestionBulkDownloadView(APIView):
                 if session_number:
                     queryset = queryset.filter(session_number=session_number)
                 
-                # Use random ordering to avoid duplicate scheduling
-                queryset = queryset.order_by('?')[:limit]
+                # Use sequential ordering for predictable processing
+                queryset = queryset.order_by('date', 'question_number')[:limit]
                 
                 master_data_ids = list(queryset.values_list('id', flat=True))
                 

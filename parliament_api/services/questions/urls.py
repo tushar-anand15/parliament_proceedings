@@ -1,6 +1,11 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from . import views
+from .views_optimized_stats import (
+    OptimizedQuestionStatsView,
+    RefreshQuestionStatsView,
+    OptimizedDebateStatsView
+)
 
 # Create a router for Lok Sabha questions
 ls_router = DefaultRouter()
@@ -16,6 +21,11 @@ urlpatterns = [
     # Lok Sabha endpoints (consistent structure)
     path('ls/', include(ls_router.urls)),
     path('ls/stats/', views.question_stats, name='ls-question-stats'),
+    
+    # Optimized statistics endpoints (using materialized views)
+    path('optimized-stats/', OptimizedQuestionStatsView.as_view(), name='optimized-question-stats'),
+    path('optimized-stats/refresh/', RefreshQuestionStatsView.as_view(), name='refresh-question-stats'),
+    path('optimized-stats/debates/', OptimizedDebateStatsView.as_view(), name='optimized-debate-stats'),
     
     # Lok Sabha Master Data endpoints
     path('ls/master-data/', views.QuestionMasterDataView.as_view(), name='ls-question-master-data'),

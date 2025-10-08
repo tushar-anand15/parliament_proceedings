@@ -127,7 +127,7 @@ install_systemd_services() {
         log_info "Enabled parliament-api-daphne"
     fi
     
-    # Enable dual Celery workers for 2x performance
+    # Enable quad Celery workers for 4x performance (32 total concurrent workers)
     if ! systemctl is-enabled parliament-celery-worker-1 >/dev/null 2>&1; then
         systemctl enable parliament-celery-worker-1
         log_info "Enabled parliament-celery-worker-1 (8 concurrent workers)"
@@ -138,10 +138,20 @@ install_systemd_services() {
         log_info "Enabled parliament-celery-worker-2 (8 concurrent workers)"
     fi
     
-    # Keep legacy worker disabled (use worker-1 and worker-2 instead)
+    if ! systemctl is-enabled parliament-celery-worker-3 >/dev/null 2>&1; then
+        systemctl enable parliament-celery-worker-3
+        log_info "Enabled parliament-celery-worker-3 (8 concurrent workers)"
+    fi
+    
+    if ! systemctl is-enabled parliament-celery-worker-4 >/dev/null 2>&1; then
+        systemctl enable parliament-celery-worker-4
+        log_info "Enabled parliament-celery-worker-4 (8 concurrent workers)"
+    fi
+    
+    # Keep legacy worker disabled (use worker-1 through worker-4 instead)
     if systemctl is-enabled parliament-celery-worker >/dev/null 2>&1; then
         systemctl disable parliament-celery-worker
-        log_info "Disabled legacy parliament-celery-worker (using dual workers instead)"
+        log_info "Disabled legacy parliament-celery-worker (using quad workers instead)"
     fi
     
     if ! systemctl is-enabled parliament-celery-beat >/dev/null 2>&1; then
@@ -276,12 +286,18 @@ restart_services() {
     systemctl restart parliament-api-daphne
     log_info "Started Daphne service"
     
-    # Start dual Celery workers (16 total concurrent workers)
+    # Start quad Celery workers (32 total concurrent workers)
     systemctl restart parliament-celery-worker-1
     log_info "Started Celery worker 1 (8 concurrent workers)"
     
     systemctl restart parliament-celery-worker-2
     log_info "Started Celery worker 2 (8 concurrent workers)"
+    
+    systemctl restart parliament-celery-worker-3
+    log_info "Started Celery worker 3 (8 concurrent workers)"
+    
+    systemctl restart parliament-celery-worker-4
+    log_info "Started Celery worker 4 (8 concurrent workers)"
     
     # Start Celery beat
     systemctl restart parliament-celery-beat
@@ -379,7 +395,9 @@ print_summary() {
     echo -e "${GREEN}Services Status:${NC}"
     echo -e "  ✓ Django API (Daphne) - Running on port 8000"
     echo -e "  ✓ Celery Worker 1     - 8 concurrent workers"
-    echo -e "  ✓ Celery Worker 2     - 8 concurrent workers (16 total)"
+    echo -e "  ✓ Celery Worker 2     - 8 concurrent workers"
+    echo -e "  ✓ Celery Worker 3     - 8 concurrent workers"
+    echo -e "  ✓ Celery Worker 4     - 8 concurrent workers (32 total)"
     echo -e "  ✓ Celery Beat         - Scheduling tasks"
     echo -e "  ✓ Flower              - Monitoring on port 5555"
     echo -e "  ✓ Nginx               - Reverse proxy"
@@ -399,9 +417,11 @@ print_summary() {
     echo -e "  Check status:        ${YELLOW}sudo systemctl status parliament-api-daphne${NC}"
     echo -e "  View logs:           ${YELLOW}sudo journalctl -u parliament-api-daphne -f${NC}"
     echo -e "  Restart API:         ${YELLOW}sudo systemctl restart parliament-api-daphne${NC}"
-    echo -e "  Restart Workers:     ${YELLOW}sudo systemctl restart parliament-celery-worker-{1,2}${NC}"
+    echo -e "  Restart Workers:     ${YELLOW}sudo systemctl restart parliament-celery-worker-{1,2,3,4}${NC}"
     echo -e "  Worker 1 logs:       ${YELLOW}tail -f /var/log/parliament_api/celery-worker-1.log${NC}"
     echo -e "  Worker 2 logs:       ${YELLOW}tail -f /var/log/parliament_api/celery-worker-2.log${NC}"
+    echo -e "  Worker 3 logs:       ${YELLOW}tail -f /var/log/parliament_api/celery-worker-3.log${NC}"
+    echo -e "  Worker 4 logs:       ${YELLOW}tail -f /var/log/parliament_api/celery-worker-4.log${NC}"
     echo -e "  Flower dashboard:    ${YELLOW}http://localhost:5555/flower/${NC}"
     echo ""
     echo -e "${GREEN}════════════════════════════════════════════════════════${NC}"

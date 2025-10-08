@@ -6,6 +6,7 @@ import uuid
 import threading
 import queue
 import time
+import random
 import requests
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
@@ -44,6 +45,9 @@ class DebateScraperService:
         self.gcs_service = GCSService()
         self.master_data_service = DebateMasterDataService()
         self.debate_category = 'corrected'  # This service handles CORRECTED debates
+        # Load delay configuration from settings
+        self.min_delay = getattr(settings, 'API_REQUEST_DELAY_MIN', 0.1)
+        self.max_delay = getattr(settings, 'API_REQUEST_DELAY_MAX', 0.3)
         
         # Set headers for API requests (corrected debates)
         self.session.headers.update({
@@ -1009,6 +1013,10 @@ class DebateScraperService:
                     time.sleep(delay)
                 else:
                     logger.info(f"Downloading PDF from {debate.pdf_url} (attempt {attempt + 1}/{max_retries})")
+                    # Add random delay to avoid overloading the source API
+                    api_delay = random.uniform(self.min_delay, self.max_delay)
+                    logger.debug(f"Waiting {api_delay:.2f}s before API call (rate limiting)")
+                    time.sleep(api_delay)
                 
                 # Update status and attempt count
                 debate.status = 'downloading'
@@ -1067,6 +1075,11 @@ class DebateScraperService:
                     }
                     
                     try:
+                        # Add random delay before session establishment
+                        session_delay = random.uniform(self.min_delay, self.max_delay)
+                        logger.debug(f"Waiting {session_delay:.2f}s before session establishment (rate limiting)")
+                        time.sleep(session_delay)
+                        
                         # Visit main page to get session cookies
                         session_resp = self.session.get('https://sansad.in/ls/debates/text-of-debates', headers=session_headers, timeout=30)
                         if session_resp.status_code == 200:

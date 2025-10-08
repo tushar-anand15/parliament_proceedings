@@ -706,7 +706,7 @@ class DebateSearchView(APIView):
         
         # IMPORTANT: Use random ordering for pending debates to avoid duplicate scheduling
         if status == 'pending':
-            debates = queryset.order_by('?')[:limit]  # Random order for pending
+            debates = queryset.order_by('debate_date')[:limit]  # Sequential order by date
         else:
             debates = queryset.order_by('-debate_date')[:limit]  # Date order for others
         

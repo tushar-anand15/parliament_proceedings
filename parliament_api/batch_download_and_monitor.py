@@ -15,16 +15,29 @@ import requests
 import time
 import sys
 import argparse
+import redis
+import subprocess
 from datetime import datetime
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 # Configuration
 BASE_URL = "https://api.opensansad.co.in"
 TOKEN = "***REMOVED_SECRET***"
 
+# Queue monitoring configuration
+MAX_QUEUE_SIZE = 10000  # Maximum acceptable queue size before pausing
+QUEUE_CHECK_INTERVAL = 30  # How often to check queue when waiting
+REDIS_HOST = 'localhost'
+REDIS_PORT = 6379
+REDIS_DB = 0
+
 HEADERS = {
     "Authorization": f"Token {TOKEN}",
-    "Content-Type": "application/json"
+    "Content-Type": "application/json",
+    "Accept": "application/json, text/plain, */*",
+    "Origin": "https://www.opensansad.co.in",
+    "Referer": "https://www.opensansad.co.in/",
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
 }
 
 # Colors
@@ -37,9 +50,191 @@ class Colors:
     FAIL = '\033[91m'
     ENDC = '\033[0m'
     BOLD = '\033[1m'
+    MAGENTA = '\033[95m'
 
 
-def fetch_with_retry(url, headers, max_retries=3, timeout=30):
+def get_redis_connection() -> Optional[redis.Redis]:
+    """Get Redis connection for queue monitoring"""
+    try:
+        r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, decode_responses=True)
+        r.ping()
+        return r
+    except (redis.ConnectionError, redis.TimeoutError) as e:
+        print(f"{Colors.WARNING}Warning: Could not connect to Redis: {e}{Colors.ENDC}")
+        return None
+
+
+def get_celery_queue_length() -> Dict[str, Any]:
+    """Get current Celery queue lengths and worker status"""
+    result = {
+        'queue_length': 0,
+        'active_tasks': 0,
+        'reserved_tasks': 0,
+        'workers': 0,
+        'error': None
+    }
+    
+    try:
+        # Try Redis first
+        r = get_redis_connection()
+        if r:
+            # Check main celery queue
+            queue_length = r.llen('celery')
+            result['queue_length'] = queue_length
+            
+            # Check for reserved tasks (being processed)
+            reserved_count = 0
+            for key in r.keys('celery-task-meta-*'):
+                try:
+                    task_data = r.get(key)
+                    if task_data and 'PENDING' in str(task_data):
+                        reserved_count += 1
+                except:
+                    pass
+            result['reserved_tasks'] = reserved_count
+            
+            # Try to get worker count from Celery inspect
+            try:
+                from celery import Celery
+                app = Celery('parliament_api', broker=f'redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}')
+                inspect = app.control.inspect()
+                active = inspect.active()
+                if active:
+                    result['workers'] = len(active.keys())
+                    result['active_tasks'] = sum(len(tasks) for tasks in active.values())
+            except:
+                # Fallback to process count
+                try:
+                    ps_output = subprocess.check_output(['ps', 'aux'], text=True)
+                    worker_count = ps_output.count('celery -A parliament_api worker')
+                    result['workers'] = worker_count
+                except:
+                    pass
+        else:
+            # Fallback to command line
+            try:
+                queue_output = subprocess.check_output(
+                    ['redis-cli', 'LLEN', 'celery'],
+                    text=True,
+                    stderr=subprocess.DEVNULL
+                ).strip()
+                result['queue_length'] = int(queue_output)
+            except (subprocess.CalledProcessError, ValueError) as e:
+                result['error'] = f"Could not check queue: {e}"
+                
+    except Exception as e:
+        result['error'] = f"Queue check failed: {e}"
+    
+    return result
+
+
+def display_queue_status(queue_info: Dict[str, Any], prefix: str = ""):
+    """Display queue status information"""
+    if queue_info.get('error'):
+        print(f"{prefix}{Colors.WARNING}Queue status unavailable: {queue_info['error']}{Colors.ENDC}")
+        return
+    
+    queue_length = queue_info.get('queue_length', 0)
+    active_tasks = queue_info.get('active_tasks', 0)
+    workers = queue_info.get('workers', 0)
+    
+    # Color code based on queue size
+    if queue_length == 0:
+        color = Colors.OKGREEN
+        status = "Empty"
+    elif queue_length < 1000:
+        color = Colors.OKGREEN
+        status = "Healthy"
+    elif queue_length < 5000:
+        color = Colors.OKCYAN
+        status = "Moderate"
+    elif queue_length < 10000:
+        color = Colors.WARNING
+        status = "High"
+    else:
+        color = Colors.FAIL
+        status = "OVERLOADED"
+    
+    print(f"{prefix}{Colors.BOLD}Queue Status:{Colors.ENDC} "
+          f"{color}{queue_length:,} pending{Colors.ENDC} ({status}) | "
+          f"Active: {active_tasks} | Workers: {workers}")
+
+
+def wait_for_queue_to_clear(max_queue_size: int = MAX_QUEUE_SIZE, 
+                           check_interval: int = QUEUE_CHECK_INTERVAL,
+                           max_wait_time: int = 1800) -> bool:
+    """Wait for the queue to drop below threshold before continuing
+    
+    Args:
+        max_queue_size: Maximum acceptable queue size
+        check_interval: How often to check the queue (seconds)
+        max_wait_time: Maximum time to wait (seconds)
+    
+    Returns:
+        True if queue cleared, False if timeout
+    """
+    start_time = time.time()
+    initial_queue_info = get_celery_queue_length()
+    initial_size = initial_queue_info.get('queue_length', 0)
+    
+    if initial_size <= max_queue_size:
+        return True
+    
+    print(f"\n{Colors.WARNING}⚠ Queue has {initial_size:,} pending tasks (threshold: {max_queue_size:,}){Colors.ENDC}")
+    print(f"{Colors.YELLOW}Waiting for queue to clear before scheduling more tasks...{Colors.ENDC}")
+    print(f"Will check every {check_interval}s (max wait: {max_wait_time}s)\n")
+    
+    check_count = 0
+    last_size = initial_size
+    
+    while (time.time() - start_time) < max_wait_time:
+        check_count += 1
+        elapsed = int(time.time() - start_time)
+        
+        # Get current queue status
+        queue_info = get_celery_queue_length()
+        current_size = queue_info.get('queue_length', 0)
+        
+        # Calculate processing rate
+        if current_size < last_size:
+            rate = (last_size - current_size) / check_interval
+            eta_seconds = int(current_size / rate) if rate > 0 else 0
+            eta_minutes = eta_seconds // 60
+            eta_str = f" | ETA: {eta_minutes}m" if rate > 0 else ""
+        else:
+            eta_str = ""
+        
+        # Display status
+        print(f"  Check #{check_count} [{elapsed}s]: ", end='')
+        display_queue_status(queue_info, prefix="")
+        
+        if current_size > last_size:
+            print(f"    {Colors.WARNING}⚠ Queue is growing! ({current_size - last_size:+,} items){Colors.ENDC}")
+        elif current_size < last_size:
+            print(f"    {Colors.OKGREEN}✓ Processing... (-{last_size - current_size:,} items){eta_str}{Colors.ENDC}")
+        
+        last_size = current_size
+        
+        # Check if queue is clear enough
+        if current_size <= max_queue_size:
+            print(f"\n{Colors.OKGREEN}✓ Queue cleared to acceptable level ({current_size:,} <= {max_queue_size:,}){Colors.ENDC}")
+            return True
+        
+        # Get current download stats
+        stats = get_statistics()
+        if stats:
+            print("    ", end='')
+            display_compact_stats(stats, prefix="")
+        
+        # Wait before next check
+        time.sleep(check_interval)
+    
+    print(f"\n{Colors.FAIL}✗ Timeout waiting for queue to clear (waited {max_wait_time}s){Colors.ENDC}")
+    print(f"Queue still has {last_size:,} pending tasks")
+    return False
+
+
+def fetch_with_retry(url, headers, max_retries=3, timeout=90):
     """Fetch URL with retry logic"""
     for attempt in range(max_retries):
         try:
@@ -143,7 +338,16 @@ def display_compact_stats(stats: Dict[str, Any], prefix: str = ""):
     
     pct = (total_downloaded / total * 100) if total > 0 else 0
     
-    print(f"{prefix}{Colors.BOLD}Progress:{Colors.ENDC} LS:{Colors.OKGREEN}{ls_downloaded:,}{Colors.ENDC}/{ls_total:,} | RS:{Colors.OKGREEN}{rs_downloaded:,}{Colors.ENDC}/{rs_total:,} | Debates:{Colors.OKGREEN}{debates_downloaded:,}{Colors.ENDC}/{debates_total:,} | {Colors.BOLD}Total: {total_downloaded:,}/{total:,} ({pct:.1f}%){Colors.ENDC}")
+    # Also show queue status inline if available
+    queue_info = get_celery_queue_length()
+    queue_str = ""
+    if not queue_info.get('error'):
+        queue_length = queue_info.get('queue_length', 0)
+        if queue_length > 0:
+            queue_color = Colors.FAIL if queue_length > 10000 else Colors.WARNING if queue_length > 5000 else Colors.OKCYAN
+            queue_str = f" | {queue_color}Queue: {queue_length:,}{Colors.ENDC}"
+    
+    print(f"{prefix}{Colors.BOLD}Progress:{Colors.ENDC} LS:{Colors.OKGREEN}{ls_downloaded:,}{Colors.ENDC}/{ls_total:,} | RS:{Colors.OKGREEN}{rs_downloaded:,}{Colors.ENDC}/{rs_total:,} | Debates:{Colors.OKGREEN}{debates_downloaded:,}{Colors.ENDC}/{debates_total:,} | {Colors.BOLD}Total: {total_downloaded:,}/{total:,} ({pct:.1f}%){Colors.ENDC}{queue_str}")
 
 
 def display_full_stats(stats: Dict[str, Any]):
@@ -203,6 +407,11 @@ def display_full_stats(stats: Dict[str, Any]):
         print(f"  Remaining: {with_url - downloaded:,}")
     
     print(f"\n{Colors.BOLD}{'='*80}{Colors.ENDC}")
+    
+    # Add queue status to full stats display
+    queue_info = get_celery_queue_length()
+    print(f"\n{Colors.BOLD}CELERY QUEUE:{Colors.ENDC}")
+    display_queue_status(queue_info, prefix="  ")
 
 
 def calculate_proportional_batch_sizes(base_batch_size: int) -> Dict[str, int]:
@@ -220,7 +429,7 @@ def calculate_proportional_batch_sizes(base_batch_size: int) -> Dict[str, int]:
 
 
 def schedule_sub_batch(batch_type: str, batch_size: int, sub_batch_size: int = 50, 
-                       delay_between_sub_batches: int = 5) -> Dict[str, Any]:
+                       delay_between_sub_batches: int = 5, show_progress: bool = True) -> Dict[str, Any]:
     """
     Schedule a batch download in smaller sub-batches to avoid overwhelming the queue
     
@@ -247,6 +456,14 @@ def schedule_sub_batch(batch_type: str, batch_size: int, sub_batch_size: int = 5
                 if current_sub_batch <= 0:
                     break
                 
+                if show_progress:
+                    # Show progress bar
+                    progress = (i + 1) / num_sub_batches
+                    bar_length = 30
+                    filled_length = int(bar_length * progress)
+                    bar = '█' * filled_length + '░' * (bar_length - filled_length)
+                    print(f"\r    Scheduling LS: [{bar}] {i+1}/{num_sub_batches} sub-batches ({scheduled_count:,}/{batch_size:,} items)", end='', flush=True)
+                
                 try:
                     response = requests.post(
                         f"{BASE_URL}/api/questions/ls/master-data/bulk-download/",
@@ -256,7 +473,7 @@ def schedule_sub_batch(batch_type: str, batch_size: int, sub_batch_size: int = 5
                             "use_celery": True,
                             "pending_only": True  # Only schedule items without PDFs
                         },
-                        timeout=30
+                        timeout=90
                     )
                     
                     if response.status_code == 200:
@@ -271,6 +488,9 @@ def schedule_sub_batch(batch_type: str, batch_size: int, sub_batch_size: int = 5
                         
                 except Exception as e:
                     errors.append(f"Sub-batch {i+1}: {str(e)}")
+            
+            if show_progress:
+                print()  # New line after progress bar
             
             return {
                 'success': True,
@@ -287,6 +507,14 @@ def schedule_sub_batch(batch_type: str, batch_size: int, sub_batch_size: int = 5
                 if current_sub_batch <= 0:
                     break
                 
+                if show_progress:
+                    # Show progress bar
+                    progress = (i + 1) / num_sub_batches
+                    bar_length = 30
+                    filled_length = int(bar_length * progress)
+                    bar = '█' * filled_length + '░' * (bar_length - filled_length)
+                    print(f"\r    Scheduling RS: [{bar}] {i+1}/{num_sub_batches} sub-batches ({scheduled_count:,}/{batch_size:,} items)", end='', flush=True)
+                
                 try:
                     response = requests.post(
                         f"{BASE_URL}/api/questions/rs/bulk-download/",
@@ -295,7 +523,7 @@ def schedule_sub_batch(batch_type: str, batch_size: int, sub_batch_size: int = 5
                             "limit": current_sub_batch,
                             "pending_only": True  # Only schedule items without PDFs
                         },
-                        timeout=30
+                        timeout=90
                     )
                     
                     if response.status_code == 200:
@@ -309,6 +537,9 @@ def schedule_sub_batch(batch_type: str, batch_size: int, sub_batch_size: int = 5
                         
                 except Exception as e:
                     errors.append(f"Sub-batch {i+1}: {str(e)}")
+            
+            if show_progress:
+                print()  # New line after progress bar
             
             return {
                 'success': True,
@@ -327,7 +558,7 @@ def schedule_sub_batch(batch_type: str, batch_size: int, sub_batch_size: int = 5
                     "status": "pending",  # Only get debates without PDFs
                     "limit": batch_size
                 },
-                timeout=30
+                timeout=90
             )
             
             if search_response.status_code != 200:
@@ -340,28 +571,40 @@ def schedule_sub_batch(batch_type: str, batch_size: int, sub_batch_size: int = 5
                 return {'message': 'No pending debates found'}
             
             # Schedule debates in sub-batches
-            for i in range(0, len(all_debate_ids), sub_batch_size):
+            total_debate_batches = (len(all_debate_ids) + sub_batch_size - 1) // sub_batch_size
+            for batch_num, i in enumerate(range(0, len(all_debate_ids), sub_batch_size), 1):
                 debate_ids_batch = all_debate_ids[i:i + sub_batch_size]
+                
+                if show_progress:
+                    # Show progress bar
+                    progress = batch_num / total_debate_batches
+                    bar_length = 30
+                    filled_length = int(bar_length * progress)
+                    bar = '█' * filled_length + '░' * (bar_length - filled_length)
+                    print(f"\r    Scheduling Debates: [{bar}] {batch_num}/{total_debate_batches} sub-batches ({scheduled_count:,}/{len(all_debate_ids):,} items)", end='', flush=True)
                 
                 try:
                     response = requests.post(
                         f"{BASE_URL}/api/debates/bulk-download/",
                         headers=HEADERS,
                         json={"debate_ids": debate_ids_batch},
-                        timeout=30
+                        timeout=90
                     )
                     
                     if response.status_code == 200:
                         scheduled_count += len(debate_ids_batch)
                     else:
-                        errors.append(f"Sub-batch {i//sub_batch_size + 1}: HTTP {response.status_code}")
+                        errors.append(f"Sub-batch {batch_num}: HTTP {response.status_code}")
                     
                     # Wait between sub-batches (except after last one)
                     if i + sub_batch_size < len(all_debate_ids):
                         time.sleep(delay_between_sub_batches)
                         
                 except Exception as e:
-                    errors.append(f"Sub-batch {i//sub_batch_size + 1}: {str(e)}")
+                    errors.append(f"Sub-batch {batch_num}: {str(e)}")
+            
+            if show_progress:
+                print()  # New line after progress bar
             
             return {
                 'success': True,
@@ -442,7 +685,9 @@ def batch_schedule_and_monitor(
     delay_between_batches: int = 300,
     download_type: str = 'all',
     sub_batch_size: int = 50,
-    delay_between_sub_batches: int = 5
+    delay_between_sub_batches: int = 5,
+    max_queue_size: int = MAX_QUEUE_SIZE,
+    wait_for_queue: bool = True
 ):
     """
     Schedule downloads in batches with live monitoring between batches
@@ -454,6 +699,8 @@ def batch_schedule_and_monitor(
         download_type: Type of downloads ('all', 'ls', 'rs', 'debates')
         sub_batch_size: Items per sub-batch (to avoid queue overflow)
         delay_between_sub_batches: Seconds between sub-batches
+        max_queue_size: Maximum queue size before waiting
+        wait_for_queue: Whether to wait for queue to clear before scheduling
     """
     
     print(f"{Colors.HEADER}{Colors.BOLD}{'='*80}{Colors.ENDC}")
@@ -474,12 +721,24 @@ def batch_schedule_and_monitor(
     print(f"  Delay between sub-batches: {delay_between_sub_batches}s")
     print(f"  Delay between major batches: {delay_between_batches}s (with live monitoring)")
     print(f"  Download type: {download_type}")
+    print(f"  Max queue size: {max_queue_size:,} items")
+    print(f"  Wait for queue: {wait_for_queue}")
     print(f"  {Colors.BOLD}NOTE:{Colors.ENDC} Only scheduling items without PDFs (pending downloads)")
     
-    # Initial stats
+    # Initial stats and queue status
     print(f"\n{Colors.BOLD}Initial Status:{Colors.ENDC}")
     initial_stats = get_statistics()
     display_compact_stats(initial_stats, prefix="  ")
+    
+    # Check initial queue status
+    print(f"\n{Colors.BOLD}Queue Status:{Colors.ENDC}")
+    queue_info = get_celery_queue_length()
+    display_queue_status(queue_info, prefix="  ")
+    
+    # Wait for queue to clear if needed
+    if wait_for_queue:
+        if not wait_for_queue_to_clear(max_queue_size, QUEUE_CHECK_INTERVAL):
+            print(f"\n{Colors.WARNING}Proceeding anyway despite high queue size...{Colors.ENDC}")
     
     # Schedule batches
     print(f"\n{Colors.HEADER}{Colors.BOLD}{'='*80}{Colors.ENDC}")
@@ -489,19 +748,32 @@ def batch_schedule_and_monitor(
     scheduled_tasks = []
     
     for batch_num in range(1, num_batches + 1):
+        # Check queue before each batch
+        if wait_for_queue and batch_num > 1:
+            queue_info = get_celery_queue_length()
+            queue_size = queue_info.get('queue_length', 0)
+            if queue_size > max_queue_size:
+                print(f"\n{Colors.WARNING}Queue check before batch {batch_num}:{Colors.ENDC}")
+                if not wait_for_queue_to_clear(max_queue_size, QUEUE_CHECK_INTERVAL, 600):
+                    print(f"{Colors.WARNING}Skipping batch {batch_num} due to queue overload{Colors.ENDC}")
+                    continue
+        
         print(f"\n{Colors.BOLD}Batch {batch_num}/{num_batches} - {datetime.now().strftime('%H:%M:%S')}:{Colors.ENDC}")
         
         # Schedule LS
         if download_type in ['all', 'ls']:
             target = batch_sizes['ls_questions']
-            print(f"  Scheduling LS questions ({target} items in sub-batches of {sub_batch_size})...")
-            result = schedule_sub_batch('ls_questions', target, sub_batch_size, delay_between_sub_batches)
+            print(f"  {Colors.OKCYAN}Scheduling LS questions ({target:,} items in {(target + sub_batch_size - 1) // sub_batch_size} sub-batches of {sub_batch_size})...{Colors.ENDC}")
+            result = schedule_sub_batch('ls_questions', target, sub_batch_size, delay_between_sub_batches, show_progress=True)
             if result.get('success'):
                 scheduled = result.get('scheduled_count', 0)
                 sub_batches = result.get('sub_batches', 0)
-                print(f"    {Colors.OKGREEN}✓ Scheduled {scheduled}/{target} in {sub_batches} sub-batches{Colors.ENDC}")
+                if scheduled == target:
+                    print(f"    {Colors.OKGREEN}✓ Successfully scheduled all {scheduled:,} items{Colors.ENDC}")
+                else:
+                    print(f"    {Colors.WARNING}⚠ Scheduled {scheduled:,}/{target:,} items{Colors.ENDC}")
                 if result.get('errors'):
-                    print(f"    {Colors.WARNING}⚠ Some sub-batches had errors{Colors.ENDC}")
+                    print(f"    {Colors.WARNING}⚠ Some sub-batches had errors: {len(result['errors'])} errors{Colors.ENDC}")
             elif 'error' in result:
                 print(f"    {Colors.FAIL}✗ {result['error']}{Colors.ENDC}")
             else:
@@ -510,14 +782,17 @@ def batch_schedule_and_monitor(
         # Schedule RS
         if download_type in ['all', 'rs']:
             target = batch_sizes['rs_questions']
-            print(f"  Scheduling RS questions ({target} items in sub-batches of {sub_batch_size})...")
-            result = schedule_sub_batch('rs_questions', target, sub_batch_size, delay_between_sub_batches)
+            print(f"  {Colors.OKCYAN}Scheduling RS questions ({target:,} items in {(target + sub_batch_size - 1) // sub_batch_size} sub-batches of {sub_batch_size})...{Colors.ENDC}")
+            result = schedule_sub_batch('rs_questions', target, sub_batch_size, delay_between_sub_batches, show_progress=True)
             if result.get('success'):
                 scheduled = result.get('scheduled_count', 0)
                 sub_batches = result.get('sub_batches', 0)
-                print(f"    {Colors.OKGREEN}✓ Scheduled {scheduled}/{target} in {sub_batches} sub-batches{Colors.ENDC}")
+                if scheduled == target:
+                    print(f"    {Colors.OKGREEN}✓ Successfully scheduled all {scheduled:,} items{Colors.ENDC}")
+                else:
+                    print(f"    {Colors.WARNING}⚠ Scheduled {scheduled:,}/{target:,} items{Colors.ENDC}")
                 if result.get('errors'):
-                    print(f"    {Colors.WARNING}⚠ Some sub-batches had errors{Colors.ENDC}")
+                    print(f"    {Colors.WARNING}⚠ Some sub-batches had errors: {len(result['errors'])} errors{Colors.ENDC}")
             elif 'error' in result:
                 print(f"    {Colors.FAIL}✗ {result['error']}{Colors.ENDC}")
             else:
@@ -526,14 +801,17 @@ def batch_schedule_and_monitor(
         # Schedule Debates
         if download_type in ['all', 'debates']:
             target = batch_sizes['debates']
-            print(f"  Scheduling debates ({target} items in sub-batches of {sub_batch_size})...")
-            result = schedule_sub_batch('debates', target, sub_batch_size, delay_between_sub_batches)
+            print(f"  {Colors.OKCYAN}Scheduling debates ({target:,} items in {(target + sub_batch_size - 1) // sub_batch_size} sub-batches of {sub_batch_size})...{Colors.ENDC}")
+            result = schedule_sub_batch('debates', target, sub_batch_size, delay_between_sub_batches, show_progress=True)
             if result.get('success'):
                 scheduled = result.get('scheduled_count', 0)
-                sub_batches = result.get('sub_batches', 0)
-                print(f"    {Colors.OKGREEN}✓ Scheduled {scheduled}/{target} in {sub_batches} sub-batches{Colors.ENDC}")
+                actual_target = result.get('target', target)
+                if scheduled > 0:
+                    print(f"    {Colors.OKGREEN}✓ Successfully scheduled {scheduled:,} items{Colors.ENDC}")
+                else:
+                    print(f"    {Colors.WARNING}⚠ No items scheduled (may be all complete){Colors.ENDC}")
                 if result.get('errors'):
-                    print(f"    {Colors.WARNING}⚠ Some sub-batches had errors{Colors.ENDC}")
+                    print(f"    {Colors.WARNING}⚠ Some sub-batches had errors: {len(result['errors'])} errors{Colors.ENDC}")
             elif 'message' in result:
                 print(f"    {Colors.WARNING}⚠ {result['message']}{Colors.ENDC}")
             elif 'error' in result:
@@ -616,6 +894,12 @@ Examples:
                        help='Only monitor, no scheduling')
     parser.add_argument('--interval', type=int, default=30,
                        help='Monitor interval in seconds (default: 30)')
+    parser.add_argument('--max-queue-size', type=int, default=MAX_QUEUE_SIZE,
+                       help=f'Maximum queue size before waiting (default: {MAX_QUEUE_SIZE})')
+    parser.add_argument('--no-wait-queue', action='store_true',
+                       help='Do not wait for queue to clear (not recommended)')
+    parser.add_argument('--check-queue', action='store_true',
+                       help='Just check the current queue status and exit')
     
     args = parser.parse_args()
     
@@ -642,6 +926,39 @@ Examples:
         time.sleep(2)
     
     try:
+        # Check queue status if requested
+        if args.check_queue:
+            print(f"\n{Colors.BOLD}Current Queue Status:{Colors.ENDC}")
+            queue_info = get_celery_queue_length()
+            display_queue_status(queue_info, prefix="  ")
+            
+            # Show detailed info
+            if not queue_info.get('error'):
+                print(f"\n{Colors.BOLD}Details:{Colors.ENDC}")
+                print(f"  Pending tasks: {queue_info.get('queue_length', 0):,}")
+                print(f"  Active tasks: {queue_info.get('active_tasks', 0):,}")
+                print(f"  Reserved tasks: {queue_info.get('reserved_tasks', 0):,}")
+                print(f"  Workers: {queue_info.get('workers', 0)}")
+                
+                queue_size = queue_info.get('queue_length', 0)
+                if queue_size > 0:
+                    print(f"\n{Colors.BOLD}Recommendations:{Colors.ENDC}")
+                    if queue_size > 50000:
+                        print(f"  {Colors.FAIL}✗ CRITICAL: Queue is severely overloaded!{Colors.ENDC}")
+                        print(f"    - Stop scheduling new tasks immediately")
+                        print(f"    - Consider clearing the queue or adding more workers")
+                    elif queue_size > 20000:
+                        print(f"  {Colors.WARNING}⚠ Queue is very high{Colors.ENDC}")
+                        print(f"    - Avoid scheduling large batches")
+                        print(f"    - Wait for queue to process before adding more")
+                    elif queue_size > 10000:
+                        print(f"  {Colors.WARNING}⚠ Queue is elevated{Colors.ENDC}")
+                        print(f"    - Schedule smaller batches")
+                        print(f"    - Monitor processing rate")
+                    else:
+                        print(f"  {Colors.OKGREEN}✓ Queue is at acceptable level{Colors.ENDC}")
+            return
+        
         if args.monitor_only:
             simple_monitor(interval=args.interval)
         else:
@@ -651,7 +968,9 @@ Examples:
                 delay_between_batches=args.delay,
                 download_type=args.type,
                 sub_batch_size=args.sub_batch_size,
-                delay_between_sub_batches=args.sub_delay
+                delay_between_sub_batches=args.sub_delay,
+                max_queue_size=args.max_queue_size,
+                wait_for_queue=not args.no_wait_queue
             )
     
     except KeyboardInterrupt:

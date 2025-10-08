@@ -1,5 +1,6 @@
 import os
 import time
+import random
 import requests
 import logging
 from datetime import datetime
@@ -33,6 +34,9 @@ class UnifiedPDFDownloadService:
         self.session = requests.Session()
         self.gcs_service = GCSService()
         self._setup_session()
+        # Load delay configuration from settings
+        self.min_delay = getattr(settings, 'API_REQUEST_DELAY_MIN', 0.1)
+        self.max_delay = getattr(settings, 'API_REQUEST_DELAY_MAX', 0.3)
     
     def _setup_session(self):
         """Setup session with base configuration"""
@@ -127,6 +131,11 @@ class UnifiedPDFDownloadService:
                 'User-Agent': self.session.headers['User-Agent'],
                 'Upgrade-Insecure-Requests': '1'
             }
+            
+            # Add random delay before session establishment
+            delay = random.uniform(self.min_delay, self.max_delay)
+            logger.debug(f"Waiting {delay:.2f}s before session establishment (rate limiting)")
+            time.sleep(delay)
             
             logger.info(f"Establishing session by visiting: {main_page_url}")
             response = self.session.get(main_page_url, headers=session_headers, timeout=30)
@@ -274,6 +283,12 @@ class UnifiedPDFDownloadService:
                     time.sleep(delay)
                 
                 logger.info(f"Downloading PDF (attempt {attempt + 1}/{max_retries}): {encoded_url}")
+                
+                # Add random delay between API calls to avoid overloading source
+                if attempt == 0:  # Only add delay on first attempt, not retries
+                    delay = random.uniform(self.min_delay, self.max_delay)
+                    logger.debug(f"Waiting {delay:.2f}s before API call (rate limiting)")
+                    time.sleep(delay)
                 
                 # Establish session on first attempt or after 403 error
                 if attempt == 0 or (last_error and '403' in str(last_error)):

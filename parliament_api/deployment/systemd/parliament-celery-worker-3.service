@@ -1,0 +1,42 @@
+[Unit]
+Description=Parliament API Celery Worker 3 (8 concurrent workers)
+After=network.target redis.service postgresql.service
+Wants=redis.service postgresql.service
+
+[Service]
+Type=exec
+User=tusharanand
+Group=tusharanand
+WorkingDirectory=/home/tusharanand/parliament_proceedings/parliament_api
+
+# Environment
+EnvironmentFile=/home/tusharanand/parliament_proceedings/parliament_api/.env
+Environment="DJANGO_SETTINGS_MODULE=parliament_api.settings"
+Environment="C_FORCE_ROOT=true"
+
+# Start Celery Worker 3 with hostname worker3
+ExecStart=/home/tusharanand/parliament_proceedings/env/bin/celery -A parliament_api worker \
+    --loglevel=info \
+    --concurrency=8 \
+    --max-tasks-per-child=1000 \
+    --hostname=worker3@%%h
+
+# Stop Celery Worker
+ExecStop=/bin/kill -s TERM $MAINPID
+
+# Restart policy
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/parliament_api/celery-worker-3.log
+StandardError=append:/var/log/parliament_api/celery-worker-3-error.log
+
+# Create PID directory
+RuntimeDirectory=parliament_api
+RuntimeDirectoryMode=0755
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

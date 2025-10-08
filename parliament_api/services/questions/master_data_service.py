@@ -1023,10 +1023,9 @@ class QuestionMasterDataService:
             if question_type:
                 queryset = queryset.filter(question_type=question_type)
             
-            # IMPORTANT: Use random ordering to avoid duplicate scheduling
-            # When there are many pending items, always taking the first N
-            # results in the same items being scheduled repeatedly
-            queryset = queryset.order_by('?')  # Random order
+            # Use sequential ordering for predictable batch processing
+            # Order by date (oldest first) then by question_number for consistency
+            queryset = queryset.order_by('date', 'question_number')
             
             if limit:
                 queryset = queryset[:limit]
