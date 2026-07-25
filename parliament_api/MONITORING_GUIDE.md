@@ -114,7 +114,7 @@ This checks:
 ### API Root
 
 ```bash
-TOKEN="***REMOVED_SECRET***"
+TOKEN="YOUR_TOKEN"
 curl -H "Authorization: Token ${TOKEN}" https://api.opensansad.co.in/api/
 ```
 
@@ -245,7 +245,7 @@ Use these API endpoints to check task status programmatically:
 ### LS Question Task Status
 
 ```bash
-TOKEN="***REMOVED_SECRET***"
+TOKEN="YOUR_TOKEN"
 TASK_ID="your-task-id-here"
 
 curl -H "Authorization: Token ${TOKEN}" \
@@ -533,7 +533,7 @@ sudo systemctl restart parliament-api-daphne parliament-celery-worker parliament
 curl https://api.opensansad.co.in/health/
 
 # Get statistics
-curl -H "Authorization: Token ***REMOVED_SECRET***" \
+curl -H "Authorization: Token YOUR_TOKEN" \
   https://api.opensansad.co.in/api/debates/statistics/
 ```
 

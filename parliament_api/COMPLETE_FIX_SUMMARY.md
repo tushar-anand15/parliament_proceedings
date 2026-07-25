@@ -210,7 +210,7 @@ Show separate stats for:
 Run the updated test:
 ```bash
 cd parliament_api
-python test_celery_integration.py --token ***REMOVED_SECRET***
+python test_celery_integration.py --token YOUR_TOKEN
 ```
 
 ### Expected Results:

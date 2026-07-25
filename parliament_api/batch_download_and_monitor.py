@@ -22,7 +22,7 @@ from typing import Dict, List, Any, Optional
 
 # Configuration
 BASE_URL = "https://api.opensansad.co.in"
-TOKEN = "***REMOVED_SECRET***"
+TOKEN = "YOUR_TOKEN"
 
 # Queue monitoring configuration
 MAX_QUEUE_SIZE = 10000  # Maximum acceptable queue size before pausing

@@ -199,7 +199,7 @@ Create `.env` file in project root:
 # Database
 DB_NAME=parliament_api
 DB_USER=parliament_user
-DB_PASSWORD=***REMOVED_SECRET***
+DB_PASSWORD=YOUR_TOKEN
 DB_HOST=localhost
 DB_PORT=5432
 

@@ -62,7 +62,7 @@ class ParliamentCeleryTester:
                  test_debates: bool = True, test_questions: bool = True):
         self.start_time = datetime.now()
         self.base_url = base_url.rstrip('/')
-        self.auth_token = auth_token or "***REMOVED_SECRET***"  # Default admin token
+        self.auth_token = auth_token or "YOUR_TOKEN"  # Default admin token
         self.test_debates = test_debates
         self.test_questions = test_questions
         
@@ -828,12 +828,12 @@ def main():
     if not args.token:
         print("⚠️  No authentication token provided!")
         print("💡 Use the admin token from setup:")
-        print("   python test_celery_integration.py --token ***REMOVED_SECRET***")
+        print("   python test_celery_integration.py --token YOUR_TOKEN")
         print("   (or use your own authentication token)")
         print("\n🔐 Admin Credentials:")
         print("   Username: parliament_admin")
         print("   Password: ParliamentAPI@2025#Secure")
-        print("   Token: ***REMOVED_SECRET***")
+        print("   Token: YOUR_TOKEN")
         print("\n" + "=" * 80)
     
     # Determine test scope

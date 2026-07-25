@@ -3,7 +3,7 @@
 ## Authentication
 All requests require a token:
 ```bash
-TOKEN="***REMOVED_SECRET***"
+TOKEN="YOUR_TOKEN"
 BASE_URL="http://localhost:8000"
 ```
 

@@ -21,7 +21,7 @@ from typing import Dict, List, Any
 
 # Configuration
 BASE_URL = "https://api.opensansad.co.in"
-TOKEN = "***REMOVED_SECRET***"
+TOKEN = "YOUR_TOKEN"
 
 HEADERS = {
     "Authorization": f"Token {TOKEN}",

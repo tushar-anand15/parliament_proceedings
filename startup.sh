@@ -386,7 +386,7 @@ start_services() {
     # Create database and user if they don't exist
     DB_NAME=${DB_NAME:-parliament_api}
     DB_USER=${DB_USER:-parliament_user}
-    DB_PASSWORD=${DB_PASSWORD:-***REMOVED_SECRET***}
+    DB_PASSWORD=${DB_PASSWORD:-YOUR_TOKEN}
     
     # Load superuser credentials from env NOW (so they're available everywhere)
     ADMIN_USERNAME=${DJANGO_SUPERUSER_USERNAME:-admin}

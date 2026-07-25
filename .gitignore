@@ -59,3 +59,11 @@ media/
 # Scraper raw data dumps
 scraper/*.json
 eci_scraper/
+
+# Google Cloud service-account keys / credentials (never commit)
+*serviceaccount*.json
+parliament-process-*.json
+*-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json
+# Local databases / Celery Flower state
+*.db
+flower.db*

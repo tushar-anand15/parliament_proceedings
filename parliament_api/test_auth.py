@@ -10,7 +10,7 @@ def test_authentication():
     """Test authentication with the Parliament API"""
     
     base_url = "http://localhost:8000"
-    admin_token = "***REMOVED_SECRET***"
+    admin_token = "YOUR_TOKEN"
     
     print("🔐 Testing Parliament API Authentication")
     print("=" * 50)

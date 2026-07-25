@@ -59,7 +59,7 @@ The Data Explorer is a **production-grade, high-performance backend service** de
 **Basic Request**:
 ```bash
 curl -X GET "http://localhost:8000/api/explorer/ls/questions/?limit=50&offset=0" \
-  -H "Authorization: Token ***REMOVED_SECRET***"
+  -H "Authorization: Token YOUR_TOKEN"
 ```
 
 **Advanced Filtering**:
@@ -77,7 +77,7 @@ curl -X GET "http://localhost:8000/api/explorer/ls/questions/ \
   &order=desc \
   &limit=100 \
   &offset=0" \
-  -H "Authorization: Token ***REMOVED_SECRET***"
+  -H "Authorization: Token YOUR_TOKEN"
 ```
 
 **Response**:
@@ -141,7 +141,7 @@ curl -X GET "http://localhost:8000/api/explorer/rs/questions/ \
   &question_type=UNSTARRED \
   &has_answer=true \
   &limit=50" \
-  -H "Authorization: Token ***REMOVED_SECRET***"
+  -H "Authorization: Token YOUR_TOKEN"
 ```
 
 ### 3. Lok Sabha Debates Explorer
@@ -160,7 +160,7 @@ curl -X GET "http://localhost:8000/api/explorer/ls/debates/ \
   &sort_by=debate_date \
   &order=desc \
   &limit=100" \
-  -H "Authorization: Token ***REMOVED_SECRET***"
+  -H "Authorization: Token YOUR_TOKEN"
 ```
 
 **Response**:
@@ -223,7 +223,7 @@ curl -X GET "http://localhost:8000/api/explorer/rs/debates/ \
   &debate_category=verbatim \
   &status=completed \
   &limit=50" \
-  -H "Authorization: Token ***REMOVED_SECRET***"
+  -H "Authorization: Token YOUR_TOKEN"
 ```
 
 ### 5. Get Metadata for Filters
@@ -231,7 +231,7 @@ curl -X GET "http://localhost:8000/api/explorer/rs/debates/ \
 **Questions Metadata**:
 ```bash
 curl -X GET "http://localhost:8000/api/explorer/metadata/questions/?institution=lok_sabha" \
-  -H "Authorization: Token ***REMOVED_SECRET***"
+  -H "Authorization: Token YOUR_TOKEN"
 ```
 
 **Response**:
@@ -267,7 +267,7 @@ curl -X GET "http://localhost:8000/api/explorer/metadata/questions/?institution=
 **Debates Metadata**:
 ```bash
 curl -X GET "http://localhost:8000/api/explorer/metadata/debates/?institution=lok_sabha" \
-  -H "Authorization: Token ***REMOVED_SECRET***"
+  -H "Authorization: Token YOUR_TOKEN"
 ```
 
 **Response**:
@@ -300,13 +300,13 @@ curl -X GET "http://localhost:8000/api/explorer/metadata/debates/?institution=lo
 **Question Detail**:
 ```bash
 curl -X GET "http://localhost:8000/api/explorer/ls/questions/12345/" \
-  -H "Authorization: Token ***REMOVED_SECRET***"
+  -H "Authorization: Token YOUR_TOKEN"
 ```
 
 **Debate Detail**:
 ```bash
 curl -X GET "http://localhost:8000/api/explorer/ls/debates/789/" \
-  -H "Authorization: Token ***REMOVED_SECRET***"
+  -H "Authorization: Token YOUR_TOKEN"
 ```
 
 ## Filter Parameters

@@ -566,7 +566,7 @@ curl -X POST https://api.yourdomain.com/api/auth/login/ \
 
 # 5. Test Authenticated Endpoint
 curl -X GET https://api.yourdomain.com/api/explorer/metadata/ \
-  -H "Authorization: Token ***REMOVED_SECRET***"
+  -H "Authorization: Token YOUR_TOKEN"
 ```
 
 **Action Required:**

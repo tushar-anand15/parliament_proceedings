@@ -13,7 +13,7 @@ NC='\033[0m' # No Color
 
 # Configuration
 BASE_URL="https://api.opensansad.co.in/api"
-TOKEN="***REMOVED_SECRET***"
+TOKEN="YOUR_TOKEN"
 
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}    Performance Baseline Testing${NC}"

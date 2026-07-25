@@ -144,21 +144,21 @@ redis-server
 ### Run Full Test Suite
 ```bash
 cd parliament_api
-python test_celery_integration.py --token ***REMOVED_SECRET***
+python test_celery_integration.py --token YOUR_TOKEN
 ```
 
 ### Run Specific Tests
 ```bash
 # Debates only
-python test_celery_integration.py --token ***REMOVED_SECRET*** --debates
+python test_celery_integration.py --token YOUR_TOKEN --debates
 
 # Questions only (LS + RS)
-python test_celery_integration.py --token ***REMOVED_SECRET*** --questions
+python test_celery_integration.py --token YOUR_TOKEN --questions
 ```
 
 ### Using Default Admin Token
 ```bash
-python test_celery_integration.py --token ***REMOVED_SECRET***
+python test_celery_integration.py --token YOUR_TOKEN
 ```
 
 ## Test Results

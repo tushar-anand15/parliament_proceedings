@@ -67,7 +67,7 @@ import os
 from datetime import datetime, timedelta
 
 BASE_URL = "https://api.opensansad.co.in"
-TOKEN = "***REMOVED_SECRET***"
+TOKEN = "YOUR_TOKEN"
 HEADERS = {
     "Authorization": f"Token {TOKEN}",
     "Content-Type": "application/json",
