@@ -1,0 +1,9 @@
+# Extend gitleaks' default ruleset and allowlist documentation placeholders.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Placeholder tokens used in API docs/examples — not real secrets"
+regexes = [
+  '''YOUR_TOKEN''',
+]
